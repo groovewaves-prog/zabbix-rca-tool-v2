@@ -324,7 +324,6 @@ def connection_dialog(source_id: str, mode: str):
                     "to": target_id,
                     "type": "peer"
                 })
-            # 操作完了時は選択状態を解除
             st.session_state.selected_devices = set()
             st.rerun()
 
@@ -347,7 +346,8 @@ def render_add_device():
                             "vendor": "",
                             "model": "",
                             "location": "",
-                            "hw_inventory": {"psu_count": 1, "fan_count": 0}
+                            "hw_inventory": {"psu_count": 1, "fan_count": 0},
+                            "network_config": {"lag_enabled": False, "vlans": []} # 初期値
                         }
                     }
                     st.success(f"追加: {new_id}")
@@ -356,11 +356,10 @@ def render_add_device():
                     st.error("ID重複")
 
 def render_device_list():
-    """デバイス一覧・操作 (チェックボックス式 + Action Panel)"""
+    """デバイス一覧・操作"""
     if not st.session_state.devices:
         return
 
-    # 【改修箇所】ソート順を「レイヤー(小->大) > 名前」のみに変更
     layers = calculate_layers()
     sorted_devs = sorted(st.session_state.devices.keys(), key=lambda x: (
         layers.get(x, 1), 
@@ -373,7 +372,7 @@ def render_device_list():
         if st.session_state.get(f"chk_{dev_id}", False):
             current_selected.append(dev_id)
     
-    # --- Action Panel (画面上部に固定的に配置される操作エリア) ---
+    # --- Action Panel ---
     st.markdown("### 📋 デバイス操作")
     
     with st.container(border=True):
@@ -410,12 +409,13 @@ def render_device_list():
             if not is_single:
                 st.caption("※「接続」や「編集」は、1つのデバイスのみ選択している場合に有効になります。")
 
-    # --- デバイスリスト (スクロール可能) ---
+    # --- デバイスリスト ---
     with st.container(height=500):
         for dev_id in sorted_devs:
             dev = st.session_state.devices[dev_id]
             meta = dev.get("metadata", {})
             hw = meta.get("hw_inventory", {})
+            net = meta.get("network_config", {})
             
             c_check, c_card = st.columns([0.5, 6])
             
@@ -429,43 +429,75 @@ def render_device_list():
                     info_badges = []
                     if meta.get("vendor"): info_badges.append(meta["vendor"])
                     if meta.get("model"): info_badges.append(meta["model"])
+                    
+                    # バッジ情報の表示強化
                     psu = hw.get("psu_count", 0)
-                    fan = hw.get("fan_count", 0)
                     if psu > 0: info_badges.append(f"⚡PSU:{psu}")
-                    if fan > 0: info_badges.append(f"💨FAN:{fan}")
+                    
+                    if net.get("lag_enabled"): info_badges.append("🔗LAG")
+                    if net.get("vlans"): info_badges.append(f"🏷️VLAN:{len(net['vlans'])}")
                     
                     if info_badges:
                         st.caption(" | ".join(info_badges))
                     else:
                         st.caption("No details")
 
-            # 編集パネル
+            # --- 詳細編集パネル（タブ化による機能拡張） ---
             if st.session_state.editing_device == dev_id:
                 with st.container(border=True):
-                    st.info(f"📝 **{dev_id}** を編集中...")
+                    st.info(f"📝 **{dev_id}** を設定中...")
+                    
                     with st.form(key=f"form_{dev_id}"):
-                        row1_c1, row1_c2 = st.columns(2)
-                        with row1_c1:
-                            curr_type = dev.get("type", "SWITCH")
-                            new_type = st.selectbox("Type", list(DEVICE_TYPES.keys()), 
-                                                    index=list(DEVICE_TYPES.keys()).index(curr_type) if curr_type in DEVICE_TYPES else 0)
-                        with row1_c2:
-                            curr_vend = meta.get("vendor", "")
-                            new_vend = st.selectbox("Vendor", [""] + VENDORS, 
-                                                    index=(VENDORS.index(curr_vend)+1) if curr_vend in VENDORS else 0)
+                        # タブでカテゴリ分け
+                        tab1, tab2, tab3 = st.tabs(["基本情報", "ハードウェア/モジュール", "論理/ネットワーク"])
+                        
+                        # --- Tab 1: 基本情報 ---
+                        with tab1:
+                            row1_c1, row1_c2 = st.columns(2)
+                            with row1_c1:
+                                curr_type = dev.get("type", "SWITCH")
+                                new_type = st.selectbox("Type", list(DEVICE_TYPES.keys()), 
+                                                        index=list(DEVICE_TYPES.keys()).index(curr_type) if curr_type in DEVICE_TYPES else 0)
+                            with row1_c2:
+                                curr_vend = meta.get("vendor", "")
+                                new_vend = st.selectbox("Vendor", [""] + VENDORS, 
+                                                        index=(VENDORS.index(curr_vend)+1) if curr_vend in VENDORS else 0)
 
-                        row2_c1, row2_c2 = st.columns(2)
-                        with row2_c1:
-                            new_model = st.text_input("Model", value=meta.get("model", ""))
-                        with row2_c2:
-                            new_loc = st.text_input("Location", value=meta.get("location", ""))
+                            row2_c1, row2_c2 = st.columns(2)
+                            with row2_c1:
+                                new_model = st.text_input("Model", value=meta.get("model", ""))
+                            with row2_c2:
+                                new_loc = st.text_input("Location", value=meta.get("location", ""))
 
-                        h1, h2 = st.columns(2)
-                        with h1:
-                            new_psu = st.number_input("PSU数", min_value=0, value=hw.get("psu_count", 1))
-                        with h2:
-                            new_fan = st.number_input("FAN数", min_value=0, value=hw.get("fan_count", 0))
+                        # --- Tab 2: ハードウェア/モジュール ---
+                        with tab2:
+                            h1, h2 = st.columns(2)
+                            with h1:
+                                new_psu = st.number_input("PSU数", min_value=0, value=hw.get("psu_count", 1))
+                            with h2:
+                                new_fan = st.number_input("FAN数", min_value=0, value=hw.get("fan_count", 0))
+                            
+                            st.markdown("##### 追加モジュール")
+                            curr_modules = hw.get("modules", "")
+                            new_modules = st.text_area("モジュール一覧 (カンマ区切りで入力)", 
+                                                       value=curr_modules, 
+                                                       placeholder="例: LineCard-10G, Supervisor-Engine-2",
+                                                       help="搭載されているラインカードや拡張モジュールを入力してください")
 
+                        # --- Tab 3: 論理/ネットワーク ---
+                        with tab3:
+                            st.markdown("##### 冗長化設定")
+                            new_lag = st.checkbox("LAG (Link Aggregation) 構成", value=net.get("lag_enabled", False))
+                            
+                            st.markdown("##### VLAN設定")
+                            curr_vlans = net.get("vlans", "")
+                            new_vlans = st.text_input("VLAN ID (カンマ区切り)", 
+                                                      value=curr_vlans,
+                                                      placeholder="例: 10, 20, 100-105")
+                            st.caption("※ ここに入力されたVLAN情報は、将来的な論理トポロジー分析に使用されます。")
+
+                        # 保存・キャンセル
+                        st.markdown("---")
                         c_save, c_cancel = st.columns([1, 1])
                         with c_save:
                             if st.form_submit_button("💾 保存", type="primary", use_container_width=True):
@@ -474,7 +506,15 @@ def render_device_list():
                                     "vendor": new_vend,
                                     "model": new_model,
                                     "location": new_loc,
-                                    "hw_inventory": {"psu_count": int(new_psu), "fan_count": int(new_fan)}
+                                    "hw_inventory": {
+                                        "psu_count": int(new_psu),
+                                        "fan_count": int(new_fan),
+                                        "modules": new_modules
+                                    },
+                                    "network_config": {
+                                        "lag_enabled": new_lag,
+                                        "vlans": new_vlans
+                                    }
                                 }
                                 st.session_state.editing_device = None
                                 st.rerun()
@@ -493,7 +533,7 @@ def render_data_io():
         export_data = {
             "topology": {},
             "redundancy_groups": {},
-            "metadata": {"version": "2.0"}
+            "metadata": {"version": "2.1"}
         }
         layers = calculate_layers()
         for d_id, d_data in st.session_state.devices.items():
@@ -553,9 +593,40 @@ def main():
         render_device_list()
         
     with col_right:
-        if st.session_state.connections:
-            with st.expander(f"🔗 接続リスト ({len(st.session_state.connections)})"):
-                for i, c in enumerate(st.session_state.connections):
+        # 【改修箇所】接続リストのフィルタリング
+        # 選択されたデバイスがある場合、そのデバイスに関連する接続のみを表示
+        
+        # チェックされているデバイスIDを取得（Action Panelのロジックと同じ方法）
+        layers = calculate_layers()
+        sorted_devs = sorted(st.session_state.devices.keys(), key=lambda x: (layers.get(x, 1), x))
+        current_selected = []
+        for dev_id in sorted_devs:
+            if st.session_state.get(f"chk_{dev_id}", False):
+                current_selected.append(dev_id)
+        
+        # フィルタリングロジック
+        all_conns = st.session_state.connections
+        
+        if current_selected:
+            # 選択中のデバイスが含まれる接続のみ抽出
+            display_conns = [
+                (i, c) for i, c in enumerate(all_conns)
+                if c["from"] in current_selected or c["to"] in current_selected
+            ]
+            header_text = f"🔗 関連する接続 ({len(display_conns)})"
+            is_expanded = True
+        else:
+            # 何も選択されていない場合は全件（デフォルトは閉じる）
+            display_conns = [(i, c) for i, c in enumerate(all_conns)]
+            header_text = f"🔗 全接続リスト ({len(display_conns)})"
+            is_expanded = False
+
+        if display_conns:
+            with st.expander(header_text, expanded=is_expanded):
+                if not current_selected and display_conns:
+                     st.caption("※ 左側でデバイスを選択すると、関連する接続のみに絞り込まれます。")
+                
+                for i, c in display_conns:
                     col_c1, col_c2 = st.columns([6,1])
                     with col_c1:
                         if c["type"] == "uplink":
@@ -566,6 +637,9 @@ def main():
                         if st.button("🗑️", key=f"del_conn_{i}"):
                             st.session_state.connections.pop(i)
                             st.rerun()
+        else:
+            if all_conns and current_selected:
+                 st.info("選択されたデバイスに関連する接続はありません。")
         
         render_data_io()
 
