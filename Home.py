@@ -1,10 +1,4 @@
-"""
-Zabbix RCA Tool - Home
-"""
-
 import streamlit as st
-import json
-import os
 
 st.set_page_config(
     page_title="Zabbix RCA Tool",
@@ -13,58 +7,28 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
-
-def get_status():
-    """データ状態を取得"""
+# ==================== データ状態取得 ====================
+def get_session_status():
+    """
+    Session Stateからデータの状態を取得する。
+    Streamlit Cloudなどディスク永続化が保証されない環境向け。
+    """
     status = {
-        "topology": {"exists": False, "count": 0, "file": None},
-        "config": {"exists": False, "count": 0, "file": None},
-        "alerts": {"exists": False, "count": 0, "file": None},
+        "topology": {"count": 0, "status": "⚠️ 未作成"},
+        "config": {"count": 0, "status": "ℹ️ 未生成"}, # 今回のスコープ外だが枠組みだけ用意
+        "alerts": {"count": 0, "status": "ℹ️ 待機中"},
     }
     
-    # トポロジー
-    topo_path = os.path.join(DATA_DIR, "topology.json")
-    if os.path.exists(topo_path):
-        try:
-            with open(topo_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                status["topology"] = {
-                    "exists": True,
-                    "count": len(data),
-                    "file": "topology.json"
-                }
-        except:
-            pass
+    # トポロジーデータのチェック (1_topology_builder.py で管理)
+    if "devices" in st.session_state and st.session_state.devices:
+        count = len(st.session_state.devices)
+        status["topology"] = {
+            "count": count,
+            "status": f"✅ {count}台 (メモリ内)"
+        }
     
-    # 監視設定
-    config_path = os.path.join(DATA_DIR, "zabbix_config.json")
-    if os.path.exists(config_path):
-        try:
-            with open(config_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                status["config"] = {
-                    "exists": True,
-                    "count": data.get("summary", {}).get("host_count", 0),
-                    "file": "zabbix_config.json"
-                }
-        except:
-            pass
-    
-    # アラート
-    alerts_path = os.path.join(DATA_DIR, "alerts.json")
-    if os.path.exists(alerts_path):
-        try:
-            with open(alerts_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                alerts = data.get("alerts", data) if isinstance(data, dict) else data
-                status["alerts"] = {
-                    "exists": True,
-                    "count": len(alerts) if isinstance(alerts, list) else 0,
-                    "file": "alerts.json"
-                }
-        except:
-            pass
+    # ※ ConfigやAlertsも同様に session_state に保存する設計にするのが望ましい
+    # 必要に応じて追加実装してください
     
     return status
 
@@ -83,49 +47,38 @@ with col1:
         st.switch_page("pages/1_topology_builder.py")
 
 with col2:
-    if st.button("⚙️ 監視設定生成", use_container_width=True, type="primary"):
-        st.switch_page("pages/2_config_generator.py")
+    if st.button("⚙️ 監視設定生成", use_container_width=True):
+        st.info("構築中...") # st.switch_page("pages/2_config_generator.py")
 
 with col3:
-    if st.button("🎯 根本原因分析", use_container_width=True, type="primary"):
-        st.switch_page("pages/3_rca_analyzer.py")
+    if st.button("🎯 根本原因分析", use_container_width=True):
+         st.info("構築中...") # st.switch_page("pages/3_rca_analyzer.py")
 
 with col4:
-    if st.button("📁 データ管理", use_container_width=True):
-        st.switch_page("pages/4_data_manager.py")
+    # データ管理ページへのリンク（必要であれば）
+    st.empty()
 
 st.divider()
 
 # 現在の状態
-st.subheader("📊 現在の状態")
+st.subheader("📊 現在のセッション状態")
+st.caption("※ ブラウザを閉じるとデータはリセットされます。トポロジー画面でJSONを保存してください。")
 
-status = get_status()
+status = get_session_status()
 
 col1, col2, col3 = st.columns(3)
 
 with col1:
     with st.container(border=True):
         st.markdown("**🗺️ トポロジー**")
-        if status["topology"]["exists"]:
-            st.success(f"✅ {status['topology']['count']}台")
-            st.code(status["topology"]["file"], language=None)
-        else:
-            st.warning("⚠️ 未作成")
+        st.markdown(status["topology"]["status"])
 
 with col2:
     with st.container(border=True):
         st.markdown("**⚙️ 監視設定**")
-        if status["config"]["exists"]:
-            st.success(f"✅ {status['config']['count']}ホスト")
-            st.code(status["config"]["file"], language=None)
-        else:
-            st.info("ℹ️ 未生成")
+        st.markdown(status["config"]["status"])
 
 with col3:
     with st.container(border=True):
         st.markdown("**🎯 RCA**")
-        if status["alerts"]["exists"]:
-            st.info(f"📥 {status['alerts']['count']}件")
-            st.code(status["alerts"]["file"], language=None)
-        else:
-            st.info("ℹ️ 待機中")
+        st.markdown(status["alerts"]["status"])
