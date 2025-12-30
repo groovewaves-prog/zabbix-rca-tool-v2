@@ -1,0 +1,116 @@
+{
+  "topology": {
+    "WAN_ROUTER_01": {
+      "type": "ROUTER",
+      "layer": 1,
+      "parent_id": null,
+      "parent_ids": [],
+      "redundancy_group": null,
+      "metadata": {
+        "vendor": "Cisco",
+        "model": "ASR1001-X",
+        "location": "DC1-Rack01",
+        "hw_inventory": {"psu_count": 2, "fan_count": 3}
+      }
+    },
+    "CORE_SW_01": {
+      "type": "SWITCH",
+      "layer": 2,
+      "parent_id": "WAN_ROUTER_01",
+      "parent_ids": ["WAN_ROUTER_01"],
+      "redundancy_group": "CORE_HA",
+      "metadata": {
+        "vendor": "Cisco",
+        "model": "C9500",
+        "location": "DC1-Rack02",
+        "hw_inventory": {"psu_count": 2, "fan_count": 4}
+      }
+    },
+    "CORE_SW_02": {
+      "type": "SWITCH",
+      "layer": 2,
+      "parent_id": "WAN_ROUTER_01",
+      "parent_ids": ["WAN_ROUTER_01"],
+      "redundancy_group": "CORE_HA",
+      "metadata": {
+        "vendor": "Cisco",
+        "model": "C9500",
+        "location": "DC1-Rack02",
+        "hw_inventory": {"psu_count": 2, "fan_count": 4}
+      }
+    },
+    "L2_SW_01": {
+      "type": "SWITCH",
+      "layer": 3,
+      "parent_id": "CORE_SW_01",
+      "parent_ids": ["CORE_SW_01", "CORE_SW_02"],
+      "redundancy_group": null,
+      "metadata": {
+        "vendor": "Cisco",
+        "model": "C9300",
+        "location": "DC1-Rack03",
+        "hw_inventory": {"psu_count": 2}
+      }
+    },
+    "L2_SW_02": {
+      "type": "SWITCH",
+      "layer": 3,
+      "parent_id": "CORE_SW_01",
+      "parent_ids": ["CORE_SW_01", "CORE_SW_02"],
+      "redundancy_group": null,
+      "metadata": {
+        "vendor": "Cisco",
+        "model": "C9300",
+        "location": "DC1-Rack03",
+        "hw_inventory": {"psu_count": 2}
+      }
+    },
+    "AP_01": {
+      "type": "ACCESS_POINT",
+      "layer": 4,
+      "parent_id": "L2_SW_01",
+      "parent_ids": ["L2_SW_01"],
+      "redundancy_group": null,
+      "metadata": {"vendor": "Cisco", "model": "AP3800", "location": "Floor1"}
+    },
+    "AP_02": {
+      "type": "ACCESS_POINT",
+      "layer": 4,
+      "parent_id": "L2_SW_01",
+      "parent_ids": ["L2_SW_01"],
+      "redundancy_group": null,
+      "metadata": {"vendor": "Cisco", "model": "AP3800", "location": "Floor1"}
+    },
+    "SRV_WEB_01": {
+      "type": "SERVER",
+      "layer": 4,
+      "parent_id": "L2_SW_02",
+      "parent_ids": ["L2_SW_02"],
+      "redundancy_group": "WEB_CLUSTER",
+      "metadata": {"vendor": "Dell", "model": "PowerEdge R640", "location": "DC1-Rack04"}
+    },
+    "SRV_WEB_02": {
+      "type": "SERVER",
+      "layer": 4,
+      "parent_id": "L2_SW_02",
+      "parent_ids": ["L2_SW_02"],
+      "redundancy_group": "WEB_CLUSTER",
+      "metadata": {"vendor": "Dell", "model": "PowerEdge R640", "location": "DC1-Rack04"}
+    }
+  },
+  "redundancy_groups": {
+    "CORE_HA": {
+      "type": "Active-Active",
+      "members": ["CORE_SW_01", "CORE_SW_02"]
+    },
+    "WEB_CLUSTER": {
+      "type": "Cluster",
+      "members": ["SRV_WEB_01", "SRV_WEB_02"]
+    }
+  },
+  "metadata": {
+    "created_at": "2024-01-15T10:00:00",
+    "device_count": 9,
+    "version": "2.0"
+  }
+}
