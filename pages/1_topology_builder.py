@@ -32,7 +32,6 @@ def init_session():
         st.session_state.devices = {}
     if "connections" not in st.session_state:
         st.session_state.connections = []
-    # connect_mode はダイアログ化に伴い廃止
     if "editing_device" not in st.session_state:
         st.session_state.editing_device = None
 
@@ -227,17 +226,27 @@ def generate_visjs_html() -> str:
     """
 
 # ==================== ダイアログ (Modal) ====================
-# これにより、接続画面が中央にポップアップし、操作性を劇的に改善します
 @st.dialog("接続設定")
 def connection_dialog(source_id: str, mode: str):
     label = "下位(ダウンリンク)" if mode == "uplink" else "ピア(対等)"
     st.write(f"**{source_id}** からの **{label}** 接続先を選択してください。")
     
-    # 自分自身を除くデバイスリスト
-    candidates = [d for d in st.session_state.devices.keys() if d != source_id]
+    # 【改修箇所】既に接続済み（親、子、既存ピア）のデバイスをリストアップして除外する
+    connected_targets = set()
+    for c in st.session_state.connections:
+        # source_id が「from」側にある場合、相手は「to」
+        if c["from"] == source_id:
+            connected_targets.add(c["to"])
+        # source_id が「to」側にある場合、相手は「from」
+        if c["to"] == source_id:
+            connected_targets.add(c["from"])
+            
+    # 自分自身と、既に接続済みのデバイスを除外してリスト化
+    candidates = [d for d in st.session_state.devices.keys() 
+                  if d != source_id and d not in connected_targets]
     
     if not candidates:
-        st.warning("接続可能な他のデバイスがありません。")
+        st.warning("接続可能なデバイスがありません（全て接続済みか、他にデバイスがありません）。")
         if st.button("閉じる"):
             st.rerun()
         return
@@ -246,7 +255,7 @@ def connection_dialog(source_id: str, mode: str):
     
     # 接続ボタン
     if st.button("接続を作成", type="primary", use_container_width=True):
-        # 1. 既存接続チェック
+        # 1. 念のための既存接続チェック（リスト除外しているので本来は不要だが安全策）
         exists = any(
             (c["from"] == source_id and c["to"] == target_id) or
             (c["from"] == target_id and c["to"] == source_id)
@@ -295,212 +304,3 @@ def render_add_device():
             if st.button("追加", type="primary", use_container_width=True):
                 if new_id and new_id not in st.session_state.devices:
                     st.session_state.devices[new_id] = {
-                        "type": "SWITCH", 
-                        "metadata": {
-                            "vendor": "",
-                            "model": "",
-                            "location": "",
-                            "hw_inventory": {"psu_count": 1, "fan_count": 0}
-                        }
-                    }
-                    st.success(f"追加: {new_id}")
-                    st.rerun()
-                elif new_id in st.session_state.devices:
-                    st.error("ID重複")
-
-def render_device_list():
-    """デバイス一覧・操作"""
-    if not st.session_state.devices:
-        return
-
-    st.subheader("📋 デバイス操作")
-    
-    layers = calculate_layers()
-    # 表示順: レイヤー順 -> 名前順
-    sorted_devs = sorted(st.session_state.devices.keys(), key=lambda x: (layers.get(x, 99), x))
-    
-    for dev_id in sorted_devs:
-        dev = st.session_state.devices[dev_id]
-        meta = dev.get("metadata", {})
-        hw = meta.get("hw_inventory", {})
-        
-        with st.container(border=True):
-            col_info, col_menu = st.columns([5, 1])
-            
-            with col_info:
-                st.markdown(f"**{dev_id}** (L{layers.get(dev_id,1)})")
-                info_badges = []
-                if meta.get("vendor"): info_badges.append(meta["vendor"])
-                if meta.get("model"): info_badges.append(meta["model"])
-                psu = hw.get("psu_count", 0)
-                fan = hw.get("fan_count", 0)
-                if psu > 0: info_badges.append(f"⚡PSU:{psu}")
-                if fan > 0: info_badges.append(f"💨FAN:{fan}")
-                
-                if info_badges:
-                    st.caption(" | ".join(info_badges))
-                else:
-                    st.caption("No details")
-
-            with col_menu:
-                is_editing = (st.session_state.editing_device == dev_id)
-
-                # ポップオーバーメニュー
-                with st.popover("⚙️", use_container_width=True):
-                    
-                    # 1. 詳細・編集
-                    btn_label = "📝 閉じる" if is_editing else "📝 詳細・編集"
-                    if st.button(btn_label, key=f"edit_{dev_id}", use_container_width=True):
-                        st.session_state.editing_device = None if is_editing else dev_id
-                        st.rerun()
-                    
-                    # 2. 下位接続 (ダイアログ起動)
-                    # ここで `disabled` を削除しました。いつでも押せます。
-                    if st.button("↓ 下位接続", key=f"down_{dev_id}", use_container_width=True):
-                        connection_dialog(dev_id, "uplink")
-                    
-                    # 3. ピア接続 (ダイアログ起動)
-                    if st.button("→ ピア接続", key=f"peer_{dev_id}", use_container_width=True):
-                        connection_dialog(dev_id, "peer")
-
-                    st.divider()
-
-                    # 4. 削除
-                    if st.button("🗑️ 削除", key=f"del_{dev_id}", type="primary", use_container_width=True):
-                        del st.session_state.devices[dev_id]
-                        # 関連する接続も削除
-                        st.session_state.connections = [c for c in st.session_state.connections 
-                                                      if c["from"] != dev_id and c["to"] != dev_id]
-                        if is_editing: st.session_state.editing_device = None
-                        st.rerun()
-
-            # 編集フォーム
-            if is_editing:
-                st.markdown("---")
-                with st.form(key=f"form_{dev_id}"):
-                    st.caption("基本情報")
-                    f1, f2, f3, f4 = st.columns(4)
-                    with f1:
-                        curr_type = dev.get("type", "SWITCH")
-                        new_type = st.selectbox("Type", list(DEVICE_TYPES.keys()), 
-                                                index=list(DEVICE_TYPES.keys()).index(curr_type) if curr_type in DEVICE_TYPES else 0)
-                    with f2:
-                        curr_vend = meta.get("vendor", "")
-                        new_vend = st.selectbox("Vendor", [""] + VENDORS, 
-                                                index=(VENDORS.index(curr_vend)+1) if curr_vend in VENDORS else 0)
-                    with f3:
-                        new_model = st.text_input("Model", value=meta.get("model", ""))
-                    with f4:
-                        new_loc = st.text_input("Location", value=meta.get("location", ""))
-
-                    st.caption("ハードウェア冗長・インベントリ")
-                    h1, h2, h3 = st.columns([1, 1, 2])
-                    with h1:
-                        new_psu = st.number_input("PSU数", min_value=0, value=hw.get("psu_count", 1))
-                    with h2:
-                        new_fan = st.number_input("FAN数", min_value=0, value=hw.get("fan_count", 0))
-                    with h3:
-                        st.info("💡 PSUやFANの数は、RCA分析時のハードウェア障害判定に使用されます。")
-
-                    if st.form_submit_button("💾 保存", type="primary"):
-                        st.session_state.devices[dev_id]["type"] = new_type
-                        st.session_state.devices[dev_id]["metadata"] = {
-                            "vendor": new_vend,
-                            "model": new_model,
-                            "location": new_loc,
-                            "hw_inventory": {"psu_count": int(new_psu), "fan_count": int(new_fan)}
-                        }
-                        st.session_state.editing_device = None
-                        st.rerun()
-
-def render_data_io():
-    """JSON Import/Export"""
-    st.divider()
-    st.subheader("💾 データ管理")
-    
-    c1, c2 = st.columns(2)
-    with c1:
-        export_data = {
-            "topology": {},
-            "redundancy_groups": {},
-            "metadata": {"version": "2.0"}
-        }
-        layers = calculate_layers()
-        for d_id, d_data in st.session_state.devices.items():
-            parents = [c["to"] for c in st.session_state.connections 
-                      if c["from"] == d_id and c["type"] == "uplink"]
-            
-            export_data["topology"][d_id] = {
-                "type": d_data["type"],
-                "layer": layers.get(d_id, 1),
-                "parent_id": parents[0] if parents else None,
-                "parent_ids": parents,
-                "metadata": d_data["metadata"]
-            }
-        
-        json_str = json.dumps(export_data, ensure_ascii=False, indent=2)
-        st.download_button("📥 JSONダウンロード", json_str, "full_topology.json", "application/json", type="primary")
-
-    with c2:
-        uploaded = st.file_uploader("📤 JSON読み込み", type=["json"])
-        if uploaded:
-            if st.button("適用", type="primary"):
-                try:
-                    data = json.load(uploaded)
-                    topo = data.get("topology", {})
-                    new_devs = {}
-                    new_conns = []
-                    
-                    for d_id, d_val in topo.items():
-                        new_devs[d_id] = {
-                            "type": d_val.get("type", "SWITCH"),
-                            "metadata": d_val.get("metadata", {})
-                        }
-                        p_ids = d_val.get("parent_ids", [])
-                        if not p_ids and d_val.get("parent_id"):
-                             p_ids = [d_val.get("parent_id")]
-                        for p_id in p_ids:
-                            new_conns.append({"from": d_id, "to": p_id, "type": "uplink"})
-                            
-                    st.session_state.devices = new_devs
-                    st.session_state.connections = new_conns
-                    st.success("読み込み完了")
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"エラー: {e}")
-
-# ==================== メイン ====================
-def main():
-    init_session()
-    
-    st.title("🔧 トポロジービルダー")
-    
-    components.html(generate_visjs_html(), height=480)
-    
-    # 接続モードのエリア描画関数(render_connect_mode)は削除しました
-    # 代わりにモーダルダイアログを使用します
-    
-    col_left, col_right = st.columns([1, 1])
-    with col_left:
-        render_add_device()
-        render_device_list()
-        
-    with col_right:
-        if st.session_state.connections:
-            with st.expander(f"🔗 接続リスト ({len(st.session_state.connections)})"):
-                for i, c in enumerate(st.session_state.connections):
-                    col_c1, col_c2 = st.columns([5,1])
-                    with col_c1:
-                        if c["type"] == "uplink":
-                            st.write(f"🔹 {c['to']} ← {c['from']}")
-                        else:
-                            st.write(f"🔸 {c['from']} ↔ {c['to']}")
-                    with col_c2:
-                        if st.button("✕", key=f"del_conn_{i}"):
-                            st.session_state.connections.pop(i)
-                            st.rerun()
-        
-        render_data_io()
-
-if __name__ == "__main__":
-    main()
