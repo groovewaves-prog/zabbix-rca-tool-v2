@@ -315,108 +315,110 @@ def render_device_list():
 
     st.subheader("📋 デバイス操作")
     
-    layers = calculate_layers()
-    sorted_devs = sorted(st.session_state.devices.keys(), key=lambda x: (layers.get(x, 99), x))
+    # 【改修箇所】デバイス選択用のプルダウンを作成
+    # これにより「マップのノードをクリック」に近い「対象を指定してメニューを出す」動作を実現
+    device_options = list(st.session_state.devices.keys())
     
-    for dev_id in sorted_devs:
-        dev = st.session_state.devices[dev_id]
-        meta = dev.get("metadata", {})
-        hw = meta.get("hw_inventory", {})
+    if not device_options:
+        st.info("デバイスがありません。追加してください。")
+        return
+
+    # 選択ボックス (これがノードクリックの代わりになります)
+    selected_dev_id = st.selectbox("操作するデバイスを選択:", device_options)
+
+    # 以下、選択された1つのデバイスだけを表示・操作する
+    dev_id = selected_dev_id
+    dev = st.session_state.devices[dev_id]
+    meta = dev.get("metadata", {})
+    hw = meta.get("hw_inventory", {})
+    layers = calculate_layers()
+    
+    with st.container(border=True):
+        col_info, col_menu = st.columns([5, 1])
         
-        with st.container(border=True):
-            col_info, col_menu = st.columns([5, 1])
+        with col_info:
+            st.markdown(f"**{dev_id}** (L{layers.get(dev_id,1)})")
+            info_badges = []
+            if meta.get("vendor"): info_badges.append(meta["vendor"])
+            if meta.get("model"): info_badges.append(meta["model"])
+            psu = hw.get("psu_count", 0)
+            fan = hw.get("fan_count", 0)
+            if psu > 0: info_badges.append(f"⚡PSU:{psu}")
+            if fan > 0: info_badges.append(f"💨FAN:{fan}")
             
-            with col_info:
-                st.markdown(f"**{dev_id}** (L{layers.get(dev_id,1)})")
-                info_badges = []
-                if meta.get("vendor"): info_badges.append(meta["vendor"])
-                if meta.get("model"): info_badges.append(meta["model"])
-                psu = hw.get("psu_count", 0)
-                fan = hw.get("fan_count", 0)
-                if psu > 0: info_badges.append(f"⚡PSU:{psu}")
-                if fan > 0: info_badges.append(f"💨FAN:{fan}")
+            if info_badges:
+                st.caption(" | ".join(info_badges))
+            else:
+                st.caption("No details")
+
+        with col_menu:
+            is_editing = (st.session_state.editing_device == dev_id)
+
+            with st.popover("⚙️", use_container_width=True):
                 
-                if info_badges:
-                    st.caption(" | ".join(info_badges))
-                else:
-                    st.caption("No details")
+                # 【改修箇所】「×」ボタンを含むヘッダーを削除し、純粋なメニューのみにしました
+                st.markdown("**メニュー**")
+                
+                btn_label = "📝 閉じる" if is_editing else "📝 詳細・編集"
+                if st.button(btn_label, key=f"edit_{dev_id}", use_container_width=True):
+                    st.session_state.editing_device = None if is_editing else dev_id
+                    st.rerun()
+                
+                if st.button("↓ 下位接続", key=f"down_{dev_id}", use_container_width=True):
+                    connection_dialog(dev_id, "uplink")
+                
+                if st.button("→ ピア接続", key=f"peer_{dev_id}", use_container_width=True):
+                    connection_dialog(dev_id, "peer")
 
-            with col_menu:
-                is_editing = (st.session_state.editing_device == dev_id)
+                st.divider()
 
-                with st.popover("⚙️", use_container_width=True):
-                    
-                    # --- 【改修箇所】閉じるボタンを「×」に変更し、レイアウト調整 ---
-                    c_head1, c_head2 = st.columns([4, 1]) # 4:1でボタンを端に寄せる
-                    with c_head1:
-                        st.markdown("**メニュー**")
-                    with c_head2:
-                        # クリックでRerun -> ポップアップが閉じる
-                        if st.button("×", key=f"close_{dev_id}", use_container_width=True):
-                            st.rerun()
-                    st.divider()
-                    # ----------------------------------------------------
+                if st.button("🗑️ 削除", key=f"del_{dev_id}", type="primary", use_container_width=True):
+                    del st.session_state.devices[dev_id]
+                    st.session_state.connections = [c for c in st.session_state.connections 
+                                                  if c["from"] != dev_id and c["to"] != dev_id]
+                    if is_editing: st.session_state.editing_device = None
+                    st.rerun()
 
-                    btn_label = "📝 閉じる" if is_editing else "📝 詳細・編集"
-                    if st.button(btn_label, key=f"edit_{dev_id}", use_container_width=True):
-                        st.session_state.editing_device = None if is_editing else dev_id
-                        st.rerun()
-                    
-                    if st.button("↓ 下位接続", key=f"down_{dev_id}", use_container_width=True):
-                        connection_dialog(dev_id, "uplink")
-                    
-                    if st.button("→ ピア接続", key=f"peer_{dev_id}", use_container_width=True):
-                        connection_dialog(dev_id, "peer")
+        if is_editing:
+            st.markdown("---")
+            with st.form(key=f"form_{dev_id}"):
+                st.caption("基本情報")
+                
+                row1_c1, row1_c2 = st.columns(2)
+                with row1_c1:
+                    curr_type = dev.get("type", "SWITCH")
+                    new_type = st.selectbox("Type", list(DEVICE_TYPES.keys()), 
+                                            index=list(DEVICE_TYPES.keys()).index(curr_type) if curr_type in DEVICE_TYPES else 0)
+                with row1_c2:
+                    curr_vend = meta.get("vendor", "")
+                    new_vend = st.selectbox("Vendor", [""] + VENDORS, 
+                                            index=(VENDORS.index(curr_vend)+1) if curr_vend in VENDORS else 0)
 
-                    st.divider()
+                row2_c1, row2_c2 = st.columns(2)
+                with row2_c1:
+                    new_model = st.text_input("Model", value=meta.get("model", ""))
+                with row2_c2:
+                    new_loc = st.text_input("Location", value=meta.get("location", ""))
 
-                    if st.button("🗑️ 削除", key=f"del_{dev_id}", type="primary", use_container_width=True):
-                        del st.session_state.devices[dev_id]
-                        st.session_state.connections = [c for c in st.session_state.connections 
-                                                      if c["from"] != dev_id and c["to"] != dev_id]
-                        if is_editing: st.session_state.editing_device = None
-                        st.rerun()
+                st.caption("ハードウェア冗長・インベントリ")
+                h1, h2, h3 = st.columns([1, 1, 2])
+                with h1:
+                    new_psu = st.number_input("PSU数", min_value=0, value=hw.get("psu_count", 1))
+                with h2:
+                    new_fan = st.number_input("FAN数", min_value=0, value=hw.get("fan_count", 0))
+                with h3:
+                    st.info("💡 PSUやFANの数は、RCA分析時のハードウェア障害判定に使用されます。")
 
-            if is_editing:
-                st.markdown("---")
-                with st.form(key=f"form_{dev_id}"):
-                    st.caption("基本情報")
-                    
-                    row1_c1, row1_c2 = st.columns(2)
-                    with row1_c1:
-                        curr_type = dev.get("type", "SWITCH")
-                        new_type = st.selectbox("Type", list(DEVICE_TYPES.keys()), 
-                                                index=list(DEVICE_TYPES.keys()).index(curr_type) if curr_type in DEVICE_TYPES else 0)
-                    with row1_c2:
-                        curr_vend = meta.get("vendor", "")
-                        new_vend = st.selectbox("Vendor", [""] + VENDORS, 
-                                                index=(VENDORS.index(curr_vend)+1) if curr_vend in VENDORS else 0)
-
-                    row2_c1, row2_c2 = st.columns(2)
-                    with row2_c1:
-                        new_model = st.text_input("Model", value=meta.get("model", ""))
-                    with row2_c2:
-                        new_loc = st.text_input("Location", value=meta.get("location", ""))
-
-                    st.caption("ハードウェア冗長・インベントリ")
-                    h1, h2, h3 = st.columns([1, 1, 2])
-                    with h1:
-                        new_psu = st.number_input("PSU数", min_value=0, value=hw.get("psu_count", 1))
-                    with h2:
-                        new_fan = st.number_input("FAN数", min_value=0, value=hw.get("fan_count", 0))
-                    with h3:
-                        st.info("💡 PSUやFANの数は、RCA分析時のハードウェア障害判定に使用されます。")
-
-                    if st.form_submit_button("💾 保存", type="primary"):
-                        st.session_state.devices[dev_id]["type"] = new_type
-                        st.session_state.devices[dev_id]["metadata"] = {
-                            "vendor": new_vend,
-                            "model": new_model,
-                            "location": new_loc,
-                            "hw_inventory": {"psu_count": int(new_psu), "fan_count": int(new_fan)}
-                        }
-                        st.session_state.editing_device = None
-                        st.rerun()
+                if st.form_submit_button("💾 保存", type="primary"):
+                    st.session_state.devices[dev_id]["type"] = new_type
+                    st.session_state.devices[dev_id]["metadata"] = {
+                        "vendor": new_vend,
+                        "model": new_model,
+                        "location": new_loc,
+                        "hw_inventory": {"psu_count": int(new_psu), "fan_count": int(new_fan)}
+                    }
+                    st.session_state.editing_device = None
+                    st.rerun()
 
 def render_data_io():
     """JSON Import/Export"""
