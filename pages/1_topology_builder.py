@@ -346,16 +346,16 @@ def render_device_list():
 
                 with st.popover("⚙️", use_container_width=True):
                     
-                    # --- 【改修箇所】ヘッダーと閉じるボタンを追加 ---
-                    c_head1, c_head2 = st.columns([3, 2])
+                    # --- 【改修箇所】閉じるボタンを「×」に変更し、レイアウト調整 ---
+                    c_head1, c_head2 = st.columns([4, 1]) # 4:1でボタンを端に寄せる
                     with c_head1:
                         st.markdown("**メニュー**")
                     with c_head2:
-                        # 閉じるボタン（クリックでRerun -> ポップアップが閉じる）
-                        if st.button("✖ 閉じる", key=f"close_{dev_id}", use_container_width=True):
+                        # クリックでRerun -> ポップアップが閉じる
+                        if st.button("×", key=f"close_{dev_id}", use_container_width=True):
                             st.rerun()
                     st.divider()
-                    # -------------------------------------------
+                    # ----------------------------------------------------
 
                     btn_label = "📝 閉じる" if is_editing else "📝 詳細・編集"
                     if st.button(btn_label, key=f"edit_{dev_id}", use_container_width=True):
