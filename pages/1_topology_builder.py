@@ -20,9 +20,11 @@ DEVICE_TYPES = {
     "ACCESS_POINT": {"icon": "📡", "color": "#f7971e", "label": "AP"},
     "LOAD_BALANCER": {"icon": "⚖️", "color": "#4776E6", "label": "LB"},
     "STORAGE": {"icon": "💾", "color": "#834d9b", "label": "ストレージ"},
+    "CLOUD": {"icon": "☁️", "color": "#74ebd5", "label": "クラウド"},
+    "PC": {"icon": "💻", "color": "#333333", "label": "PC"},
 }
 
-VENDORS = ["Cisco", "Juniper", "Fortinet", "Palo Alto", "Arista", "HPE", "Dell", "NetApp", "F5", "Other"]
+VENDORS = ["Cisco", "Juniper", "Fortinet", "Palo Alto", "Arista", "HPE", "Dell", "NetApp", "F5", "AWS", "Azure", "Other"]
 
 # ==================== セッション状態 ====================
 def init_session():
@@ -32,22 +34,20 @@ def init_session():
         st.session_state.connections = []
     if "connect_mode" not in st.session_state:
         st.session_state.connect_mode = None  # {"source": "dev_id", "mode": "uplink/peer"}
+    if "editing_device" not in st.session_state:
+        st.session_state.editing_device = None # 編集中のデバイスID
 
 # ==================== レイヤー計算 ====================
 def calculate_layers() -> Dict[str, int]:
-    """接続関係からレイヤーを自動計算
-    ルール: Uplink接続において、from=Child, to=Parent とみなす
-    """
+    """接続関係からレイヤーを自動計算"""
     devices = st.session_state.devices
     connections = st.session_state.connections
     
     if not devices:
         return {}
     
-    # 親（Uplink先）を持つノードを特定
-    # conn["type"] == "uplink" の場合、 conn["from"] -> conn["to"] (Child -> Parent)
     children = set()
-    parent_map = {} # child -> [parents]
+    parent_map = {}
     
     for conn in connections:
         if conn.get("type") == "uplink":
@@ -57,10 +57,8 @@ def calculate_layers() -> Dict[str, int]:
                 parent_map[child] = []
             parent_map[child].append(parent)
             
-    # 親を持たないノードがルート（Layer 1）
     root_nodes = [d for d in devices.keys() if d not in children]
     
-    # 循環参照などの場合、ルートが見つからない可能性があるため、その場合は適当なノードをルートにする
     if not root_nodes and devices:
         root_nodes = [list(devices.keys())[0]]
         
@@ -68,7 +66,6 @@ def calculate_layers() -> Dict[str, int]:
     queue = [(node, 1) for node in root_nodes]
     visited = set()
     
-    # 子ノードマップを作成（親 -> [子]）
     children_map = {}
     for conn in connections:
         if conn.get("type") == "uplink":
@@ -84,11 +81,9 @@ def calculate_layers() -> Dict[str, int]:
         visited.add(node)
         layers[node] = layer
         
-        # 自分の子を次のレイヤーとして追加
         for child in children_map.get(node, []):
             queue.append((child, layer + 1))
             
-    # 孤立ノードなどはLayer 1にする
     for d in devices.keys():
         if d not in layers:
             layers[d] = 1
@@ -97,7 +92,7 @@ def calculate_layers() -> Dict[str, int]:
 
 # ==================== vis.js HTML ====================
 def generate_visjs_html() -> str:
-    """vis.jsのHTML生成（自動配置・物理演算有効）"""
+    """vis.jsのHTML生成"""
     devices = st.session_state.devices
     connections = st.session_state.connections
     
@@ -111,7 +106,7 @@ def generate_visjs_html() -> str:
     nodes_data = []
     for dev_id, dev in devices.items():
         dev_type = dev.get("type", "SWITCH")
-        style = DEVICE_TYPES.get(dev_type, {"color": "#6c757d", "icon": "⬜"})
+        style = DEVICE_TYPES.get(dev_type, DEVICE_TYPES["SWITCH"])
         vendor = dev.get("metadata", {}).get("vendor") or ""
         layer = layers.get(dev_id, 1)
         
@@ -123,9 +118,10 @@ def generate_visjs_html() -> str:
             "id": dev_id,
             "label": label,
             "color": {"background": style["color"], "border": "#333"},
-            "font": {"color": "white", "size": 14, "face": "arial"},
+            "font": {"color": "white", "size": 16, "face": "arial"}, # フォント少し大きく
             "shape": "box",
-            "level": layer, # Hierarchical layout用
+            "level": layer,
+            "margin": 10,
         })
     
     edges_data = []
@@ -133,32 +129,28 @@ def generate_visjs_html() -> str:
         conn_type = conn.get("type", "uplink")
         
         if conn_type == "uplink":
-            # Uplink: Child(from) -> Parent(to). 
-            # 描画上は Parent -> Child に矢印を向けたい場合が多いが、
-            # ネットワーク図としては論理的に Child -> Parent がUplink。
-            # ここでは階層構造を明確にするため、vis.jsの階層方向(UD)に合わせて
-            # Parent(to) -> Child(from) にエッジを張り、矢印をつけることで「下位接続」を表現する
             edges_data.append({
-                "from": conn["to"],   # Parent
-                "to": conn["from"],   # Child
+                "from": conn["to"],
+                "to": conn["from"],
                 "arrows": "to",
                 "color": {"color": "#666"},
                 "width": 2,
             })
         else:
-            # Peer接続
+            # Peer接続: 点線を太く、目立つ色に
             edges_data.append({
                 "from": conn["from"],
                 "to": conn["to"],
-                "color": {"color": "#ff9800"},
-                "dashes": True,
-                "arrows": "", # 双方向的な意味合い
-                "width": 2,
+                "color": {"color": "#ffaa00"}, # 明るいオレンジ/黄色
+                "dashes": [10, 10], # 点線の間隔を調整
+                "arrows": "",
+                "width": 3, # 線を太く
             })
     
     nodes_json = json.dumps(nodes_data)
     edges_json = json.dumps(edges_data)
     
+    # nodeSpacing を 300 に拡大 (以前は150程度)
     return f"""
     <!DOCTYPE html>
     <html>
@@ -180,27 +172,27 @@ def generate_visjs_html() -> str:
                 layout: {{
                     hierarchical: {{
                         enabled: true,
-                        direction: 'UD', // Up-Down
+                        direction: 'UD',
                         sortMethod: 'directed',
-                        levelSeparation: 100,
-                        nodeSpacing: 150,
-                        treeSpacing: 200,
+                        levelSeparation: 120, // 階層間の距離も少し広げる
+                        nodeSpacing: 300,    // ★ここを変更：ノード間の横幅を大きく広げる
+                        treeSpacing: 320,
                         blockShifting: true,
                         edgeMinimization: true,
                         parentCentralization: true
                     }}
                 }},
                 physics: {{
-                    enabled: false // Hierarchicalの場合はPhysicsを切ったほうが安定する
+                    enabled: false
                 }},
                 interaction: {{
-                    dragNodes: false, // 自動配置を優先するためドラッグ無効（混乱防止）
+                    dragNodes: false,
                     dragView: true,
                     zoomView: true
                 }}
             }};
             var network = new vis.Network(container, data, options);
-            network.fit(); // 全体が収まるようにズーム調整
+            network.fit();
         </script>
     </body>
     </html>
@@ -209,45 +201,41 @@ def generate_visjs_html() -> str:
 # ==================== コンポーネント関数 ====================
 
 def render_add_device():
-    """デバイス追加フォーム"""
+    """デバイス追加フォーム（IDのみのシンプル版）"""
     with st.expander("➕ デバイス追加", expanded=len(st.session_state.devices) == 0):
-        c1, c2, c3, c4 = st.columns([2, 2, 2, 1])
+        # シンプルにIDと追加ボタンのみ
+        c1, c2 = st.columns([3, 1])
         with c1:
-            new_id = st.text_input("デバイスID", placeholder="CORE-SW01", key="in_new_id").strip()
+            new_id = st.text_input("デバイスID", placeholder="例: Router01", key="in_new_id").strip()
         with c2:
-            new_type = st.selectbox("タイプ", list(DEVICE_TYPES.keys()), 
-                                  format_func=lambda x: f"{DEVICE_TYPES[x]['icon']} {DEVICE_TYPES[x]['label']}")
-        with c3:
-            new_vendor = st.selectbox("ベンダー", [""] + VENDORS)
-        with c4:
-            st.write("")
+            st.write("") # スペーサー
             st.write("")
             if st.button("追加", type="primary", use_container_width=True):
                 if new_id and new_id not in st.session_state.devices:
+                    # デフォルト値で作成 (SWITCH, Vendorなし)
                     st.session_state.devices[new_id] = {
-                        "type": new_type,
-                        "metadata": {"vendor": new_vendor},
+                        "type": "SWITCH", 
+                        "metadata": {"vendor": ""},
                         "modules": []
                     }
+                    st.success(f"{new_id} を追加しました。詳細はリストから編集してください。")
                     st.rerun()
                 elif new_id in st.session_state.devices:
-                    st.error("ID重複")
+                    st.error("そのIDは既に存在します")
                 else:
-                    st.error("ID未入力")
+                    st.error("IDを入力してください")
 
 def render_connect_mode():
-    """接続モードのUI（セレクトボックス版）"""
+    """接続モードUI"""
     if not st.session_state.connect_mode:
         return
 
     mode = st.session_state.connect_mode
     source_dev = mode["source"]
-    conn_mode = mode["mode"] # 'uplink' or 'peer'
+    conn_mode = mode["mode"]
     
     st.info(f"🔗 **接続モード中**: {source_dev} から {'下位(ダウンリンク)' if conn_mode == 'uplink' else 'ピア(対等)'} 接続を作成します")
     
-    # 自分以外で、まだ接続されていない候補を探すのは複雑なので、
-    # 単純に自分以外の全デバイスを候補に出し、ロジックで制御する
     candidates = [d for d in st.session_state.devices.keys() if d != source_dev]
     
     c1, c2, c3 = st.columns([3, 1, 1])
@@ -257,9 +245,7 @@ def render_connect_mode():
     with c2:
         st.write("")
         st.write("")
-        # 接続ボタン
         if st.button("接続する", type="primary", use_container_width=True, disabled=not target_dev):
-            # 既存接続チェック
             exists = any(
                 (c["from"] == source_dev and c["to"] == target_dev) or
                 (c["from"] == target_dev and c["to"] == source_dev)
@@ -269,9 +255,6 @@ def render_connect_mode():
                 st.warning("既に接続が存在します")
             else:
                 if conn_mode == "uplink":
-                    # source(親) -> target(子) への接続操作
-                    # データ構造上は Uplink: Child(from) -> Parent(to) なので
-                    # from=target(子), to=source(親) として保存する
                     st.session_state.connections.append({
                         "from": target_dev,
                         "to": source_dev,
@@ -294,54 +277,113 @@ def render_connect_mode():
             st.rerun()
 
 def render_device_list():
-    """デバイス一覧と操作"""
+    """デバイス一覧と操作（詳細編集機能付き）"""
     if not st.session_state.devices:
         return
 
     st.subheader("📋 デバイス操作")
     
-    # レイヤー順にソートして表示したい
     layers = calculate_layers()
+    # レイヤー順、ID順でソート
     sorted_devs = sorted(st.session_state.devices.keys(), key=lambda x: (layers.get(x, 99), x))
     
     for dev_id in sorted_devs:
         dev = st.session_state.devices[dev_id]
         layer = layers.get(dev_id, 1)
         style = DEVICE_TYPES.get(dev["type"], DEVICE_TYPES["SWITCH"])
+        vendor_disp = dev["metadata"].get("vendor") or "Unknown"
         
+        # カードデザイン
         with st.container(border=True):
-            c1, c2, c3, c4 = st.columns([3, 2, 2, 1])
+            # 1行目: アイコン・ID・基本ボタン
+            c1, c2, c3, c4, c5 = st.columns([3, 1.5, 1.5, 1.5, 0.8])
+            
             with c1:
                 st.markdown(f"**{style['icon']} {dev_id}** (L{layer})")
-                if dev["metadata"].get("vendor"):
-                    st.caption(dev["metadata"]["vendor"])
+                st.caption(f"{style['label']} | {vendor_disp}")
             
-            # 操作ボタン類
-            # 接続モード中は無効化
             is_disabled = st.session_state.connect_mode is not None
             
+            # 詳細（編集）ボタン
             with c2:
-                if st.button("↓ 下位接続", key=f"btn_down_{dev_id}", 
+                # 編集モードのトグル
+                is_editing = (st.session_state.editing_device == dev_id)
+                btn_label = "📝 閉じる" if is_editing else "📝 詳細"
+                btn_type = "secondary" if is_editing else "secondary"
+                
+                if st.button(btn_label, key=f"btn_edit_{dev_id}", 
+                             disabled=is_disabled, use_container_width=True):
+                    if is_editing:
+                        st.session_state.editing_device = None
+                    else:
+                        st.session_state.editing_device = dev_id
+                    st.rerun()
+
+            with c3:
+                if st.button("↓ 下位", key=f"btn_down_{dev_id}", 
                              disabled=is_disabled, use_container_width=True):
                     st.session_state.connect_mode = {"source": dev_id, "mode": "uplink"}
                     st.rerun()
-            with c3:
-                if st.button("→ ピア接続", key=f"btn_peer_{dev_id}", 
+            with c4:
+                if st.button("→ ピア", key=f"btn_peer_{dev_id}", 
                              disabled=is_disabled, use_container_width=True):
                     st.session_state.connect_mode = {"source": dev_id, "mode": "peer"}
                     st.rerun()
-            with c4:
+            with c5:
                 if st.button("🗑️", key=f"btn_del_{dev_id}", disabled=is_disabled):
                     del st.session_state.devices[dev_id]
-                    # 関連する接続も削除
                     st.session_state.connections = [
                         c for c in st.session_state.connections
                         if c["from"] != dev_id and c["to"] != dev_id
                     ]
+                    if st.session_state.editing_device == dev_id:
+                        st.session_state.editing_device = None
                     st.rerun()
+            
+            # 2行目: 編集フォーム（詳細ボタンが押されたときだけ表示）
+            if st.session_state.editing_device == dev_id:
+                st.markdown("---")
+                st.markdown(f"**✏️ {dev_id} の詳細情報を編集**")
+                
+                ec1, ec2, ec3 = st.columns([2, 2, 1])
+                
+                # 現在の値を取得
+                current_type = dev.get("type", "SWITCH")
+                current_vendor = dev.get("metadata", {}).get("vendor", "")
+                
+                with ec1:
+                    # タイプ選択
+                    type_options = list(DEVICE_TYPES.keys())
+                    new_type = st.selectbox(
+                        "デバイスタイプ", 
+                        type_options,
+                        index=type_options.index(current_type) if current_type in type_options else 1,
+                        format_func=lambda x: f"{DEVICE_TYPES[x]['icon']} {DEVICE_TYPES[x]['label']}",
+                        key=f"edit_type_{dev_id}"
+                    )
+                
+                with ec2:
+                    # ベンダー選択
+                    new_vendor = st.selectbox(
+                        "ベンダー", 
+                        [""] + VENDORS,
+                        index=(VENDORS.index(current_vendor) + 1) if current_vendor in VENDORS else 0,
+                        key=f"edit_vendor_{dev_id}"
+                    )
+                
+                with ec3:
+                    st.write("")
+                    st.write("")
+                    # 保存ボタン
+                    if st.button("保存して閉じる", key=f"save_{dev_id}", type="primary", use_container_width=True):
+                        st.session_state.devices[dev_id]["type"] = new_type
+                        st.session_state.devices[dev_id]["metadata"]["vendor"] = new_vendor
+                        st.session_state.editing_device = None # 編集終了
+                        st.success("保存しました")
+                        st.rerun()
 
 def render_connection_list():
-    """接続リスト削除"""
+    """接続リスト"""
     if not st.session_state.connections:
         return
         
@@ -350,8 +392,6 @@ def render_connection_list():
             c1, c2 = st.columns([6, 1])
             with c1:
                 if conn["type"] == "uplink":
-                    # データ: from(子) -> to(親)
-                    # 表示: 親 -> 子 (Downlink表現の方が直感的な場合が多いが、ここではデータ通り表示しつつ補足)
                     st.write(f"🔹 {conn['to']} (親) ← {conn['from']} (子)")
                 else:
                     st.write(f"🔸 {conn['from']} ↔ {conn['to']}")
@@ -361,13 +401,11 @@ def render_connection_list():
                     st.rerun()
 
 def render_data_io():
-    """データ入出力"""
+    """データ保存・復元"""
     st.divider()
     st.subheader("💾 データ管理")
     
     c1, c2 = st.columns(2)
-    
-    # Export
     with c1:
         full_data = {
             "devices": st.session_state.devices,
@@ -382,9 +420,7 @@ def render_data_io():
             type="primary",
             use_container_width=True
         )
-        st.caption("※ Streamlit Cloudではブラウザリロードでデータが消えるため、こまめにダウンロードしてください。")
 
-    # Import
     with c2:
         uploaded = st.file_uploader("📤 JSONを読み込み (復元)", type=["json"])
         if uploaded:
@@ -394,6 +430,7 @@ def render_data_io():
                     if st.button("データを適用する", type="primary", use_container_width=True):
                         st.session_state.devices = data["devices"]
                         st.session_state.connections = data["connections"]
+                        st.session_state.editing_device = None
                         st.success("読み込み完了")
                         st.rerun()
             except Exception as e:
@@ -405,18 +442,18 @@ def main():
     
     st.title("🔧 トポロジービルダー")
     
-    # 1. ネットワーク図（常に上部に表示）
-    components.html(generate_visjs_html(), height=460)
+    # 1. ネットワーク図
+    components.html(generate_visjs_html(), height=480)
     
-    # 2. 接続モード（アクティブ時のみ表示）
+    # 2. 接続モード（アクティブ時のみ）
     render_connect_mode()
     
     col_left, col_right = st.columns([1, 1])
     
     with col_left:
-        # 3. デバイス追加
+        # 3. デバイス追加（シンプル化）
         render_add_device()
-        # 4. デバイス一覧・操作
+        # 4. デバイス一覧（詳細ボタン追加）
         render_device_list()
         
     with col_right:
