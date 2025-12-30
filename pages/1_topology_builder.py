@@ -11,7 +11,7 @@ st.set_page_config(
     initial_sidebar_state="collapsed"
 )
 
-# ==================== 定数 ====================
+# ==================== 定数・設定 ====================
 DEVICE_TYPES = {
     "ROUTER": {"color": "#667eea", "label": "Router"},
     "SWITCH": {"color": "#11998e", "label": "Switch"},
@@ -34,6 +34,8 @@ def init_session():
         st.session_state.connections = []
     if "editing_device" not in st.session_state:
         st.session_state.editing_device = None
+    if "selected_devices" not in st.session_state:
+        st.session_state.selected_devices = set()
 
 # ==================== ロジック・計算 ====================
 def calculate_layers() -> Dict[str, int]:
@@ -44,13 +46,11 @@ def calculate_layers() -> Dict[str, int]:
     if not devices:
         return {}
     
-    # 子ノード（下位接続の先）を特定
     children = set()
     for conn in connections:
         if conn.get("type") == "uplink":
             children.add(conn["from"])
             
-    # 親を持たないノードがルート
     root_nodes = [d for d in devices.keys() if d not in children]
     if not root_nodes and devices:
         root_nodes = [list(devices.keys())[0]]
@@ -59,7 +59,6 @@ def calculate_layers() -> Dict[str, int]:
     queue = [(node, 1) for node in root_nodes]
     visited = set()
     
-    # 親 -> 子へのマップ
     children_map = {}
     for conn in connections:
         if conn.get("type") == "uplink":
@@ -78,7 +77,6 @@ def calculate_layers() -> Dict[str, int]:
         for child in children_map.get(node, []):
             queue.append((child, layer + 1))
             
-    # 孤立ノードなどは便宜上レイヤー1へ
     for d in devices.keys():
         if d not in layers:
             layers[d] = 1
@@ -86,7 +84,7 @@ def calculate_layers() -> Dict[str, int]:
     return layers
 
 def check_lineage(dev_a: str, dev_b: str) -> bool:
-    """親子関係チェック（ピア接続時の矛盾防止用）"""
+    """親子関係チェック"""
     connections = st.session_state.connections
     
     parent_map = {}
@@ -114,15 +112,13 @@ def check_lineage(dev_a: str, dev_b: str) -> bool:
     ancestors_a = get_ancestors(dev_a)
     ancestors_b = get_ancestors(dev_b)
 
-    # AがBの祖先、またはBがAの祖先である場合はTrue（関係あり）
     if dev_b in ancestors_a or dev_a in ancestors_b:
         return True
     return False
 
 def check_cycle_for_uplink(parent: str, child: str) -> bool:
-    """下位接続を作成したときに循環が発生しないかチェック"""
+    """循環参照チェック"""
     connections = st.session_state.connections
-    
     parent_map = {}
     for conn in connections:
         if conn["type"] == "uplink":
@@ -136,14 +132,12 @@ def check_cycle_for_uplink(parent: str, child: str) -> bool:
     while queue:
         curr = queue.pop(0)
         if curr == child:
-            return True # 循環検知
+            return True
         if curr in visited:
             continue
         visited.add(curr)
-        
         for p in parent_map.get(curr, []):
             queue.append(p)
-            
     return False
 
 # ==================== vis.js HTML ====================
@@ -198,7 +192,6 @@ def generate_visjs_html() -> str:
                 "width": 2,
             })
         else:
-            # Peer接続
             edges_data.append({
                 "from": conn["from"],
                 "to": conn["to"],
@@ -331,7 +324,8 @@ def connection_dialog(source_id: str, mode: str):
                     "to": target_id,
                     "type": "peer"
                 })
-            st.success("接続しました")
+            # 操作完了時は選択状態を解除
+            st.session_state.selected_devices = set()
             st.rerun()
 
 # ==================== UIコンポーネント ====================
@@ -362,26 +356,75 @@ def render_add_device():
                     st.error("ID重複")
 
 def render_device_list():
-    """デバイス一覧・操作"""
+    """デバイス一覧・操作 (チェックボックス式 + Action Panel)"""
     if not st.session_state.devices:
         return
 
-    st.subheader("📋 デバイス操作")
-    
+    # 【改修箇所】ソート順を「レイヤー(小->大) > 名前」のみに変更
     layers = calculate_layers()
-    sorted_devs = sorted(st.session_state.devices.keys(), key=lambda x: (layers.get(x, 99), x))
+    sorted_devs = sorted(st.session_state.devices.keys(), key=lambda x: (
+        layers.get(x, 1), 
+        x
+    ))
+
+    # チェックボックスの状態収集
+    current_selected = []
+    for dev_id in sorted_devs:
+        if st.session_state.get(f"chk_{dev_id}", False):
+            current_selected.append(dev_id)
     
-    # 【改修箇所】高さ制限（500px）を設け、スクロール可能にする
+    # --- Action Panel (画面上部に固定的に配置される操作エリア) ---
+    st.markdown("### 📋 デバイス操作")
+    
+    with st.container(border=True):
+        if not current_selected:
+            st.info("👇 下のリストから操作したいデバイスにチェックを入れてください")
+        else:
+            sel_str = ", ".join(current_selected)
+            st.markdown(f"**選択中:** `{sel_str}`")
+            
+            ac1, ac2, ac3, ac4 = st.columns(4)
+            is_single = (len(current_selected) == 1)
+            target_id = current_selected[0] if is_single else None
+            
+            with ac1:
+                if st.button("📝 詳細・編集", disabled=not is_single, use_container_width=True):
+                    st.session_state.editing_device = target_id
+                    st.rerun()
+            with ac2:
+                if st.button("⬇️ 下位接続", disabled=not is_single, use_container_width=True):
+                    connection_dialog(target_id, "uplink")
+            with ac3:
+                if st.button("↔️ ピア接続", disabled=not is_single, use_container_width=True):
+                    connection_dialog(target_id, "peer")
+            with ac4:
+                if st.button("🗑️ 削除", type="primary", use_container_width=True):
+                    for d_id in current_selected:
+                        if d_id in st.session_state.devices:
+                            del st.session_state.devices[d_id]
+                            st.session_state.connections = [c for c in st.session_state.connections 
+                                                          if c["from"] != d_id and c["to"] != d_id]
+                    st.session_state.editing_device = None
+                    st.rerun()
+            
+            if not is_single:
+                st.caption("※「接続」や「編集」は、1つのデバイスのみ選択している場合に有効になります。")
+
+    # --- デバイスリスト (スクロール可能) ---
     with st.container(height=500):
         for dev_id in sorted_devs:
             dev = st.session_state.devices[dev_id]
             meta = dev.get("metadata", {})
             hw = meta.get("hw_inventory", {})
             
-            with st.container(border=True):
-                col_info, col_menu = st.columns([5, 1])
-                
-                with col_info:
+            c_check, c_card = st.columns([0.5, 6])
+            
+            with c_check:
+                st.write("") 
+                st.checkbox("", key=f"chk_{dev_id}")
+            
+            with c_card:
+                with st.container(border=True):
                     st.markdown(f"**{dev_id}** (L{layers.get(dev_id,1)})")
                     info_badges = []
                     if meta.get("vendor"): info_badges.append(meta["vendor"])
@@ -396,75 +439,49 @@ def render_device_list():
                     else:
                         st.caption("No details")
 
-                with col_menu:
-                    is_editing = (st.session_state.editing_device == dev_id)
+            # 編集パネル
+            if st.session_state.editing_device == dev_id:
+                with st.container(border=True):
+                    st.info(f"📝 **{dev_id}** を編集中...")
+                    with st.form(key=f"form_{dev_id}"):
+                        row1_c1, row1_c2 = st.columns(2)
+                        with row1_c1:
+                            curr_type = dev.get("type", "SWITCH")
+                            new_type = st.selectbox("Type", list(DEVICE_TYPES.keys()), 
+                                                    index=list(DEVICE_TYPES.keys()).index(curr_type) if curr_type in DEVICE_TYPES else 0)
+                        with row1_c2:
+                            curr_vend = meta.get("vendor", "")
+                            new_vend = st.selectbox("Vendor", [""] + VENDORS, 
+                                                    index=(VENDORS.index(curr_vend)+1) if curr_vend in VENDORS else 0)
 
-                    with st.popover("⚙️", use_container_width=True):
-                        st.markdown("**メニュー**")
-                        
-                        btn_label = "📝 閉じる" if is_editing else "📝 詳細・編集"
-                        if st.button(btn_label, key=f"edit_{dev_id}", use_container_width=True):
-                            st.session_state.editing_device = None if is_editing else dev_id
-                            st.rerun()
-                        
-                        if st.button("↓ 下位接続", key=f"down_{dev_id}", use_container_width=True):
-                            connection_dialog(dev_id, "uplink")
-                        
-                        if st.button("→ ピア接続", key=f"peer_{dev_id}", use_container_width=True):
-                            connection_dialog(dev_id, "peer")
+                        row2_c1, row2_c2 = st.columns(2)
+                        with row2_c1:
+                            new_model = st.text_input("Model", value=meta.get("model", ""))
+                        with row2_c2:
+                            new_loc = st.text_input("Location", value=meta.get("location", ""))
 
-                        st.divider()
+                        h1, h2 = st.columns(2)
+                        with h1:
+                            new_psu = st.number_input("PSU数", min_value=0, value=hw.get("psu_count", 1))
+                        with h2:
+                            new_fan = st.number_input("FAN数", min_value=0, value=hw.get("fan_count", 0))
 
-                        if st.button("🗑️ 削除", key=f"del_{dev_id}", type="primary", use_container_width=True):
-                            del st.session_state.devices[dev_id]
-                            st.session_state.connections = [c for c in st.session_state.connections 
-                                                          if c["from"] != dev_id and c["to"] != dev_id]
-                            if is_editing: st.session_state.editing_device = None
-                            st.rerun()
-
-            if is_editing:
-                st.markdown("---")
-                with st.form(key=f"form_{dev_id}"):
-                    st.caption("基本情報")
-                    
-                    row1_c1, row1_c2 = st.columns(2)
-                    with row1_c1:
-                        curr_type = dev.get("type", "SWITCH")
-                        new_type = st.selectbox("Type", list(DEVICE_TYPES.keys()), 
-                                                index=list(DEVICE_TYPES.keys()).index(curr_type) if curr_type in DEVICE_TYPES else 0)
-                    with row1_c2:
-                        curr_vend = meta.get("vendor", "")
-                        new_vend = st.selectbox("Vendor", [""] + VENDORS, 
-                                                index=(VENDORS.index(curr_vend)+1) if curr_vend in VENDORS else 0)
-
-                    row2_c1, row2_c2 = st.columns(2)
-                    with row2_c1:
-                        new_model = st.text_input("Model", value=meta.get("model", ""))
-                    with row2_c2:
-                        new_loc = st.text_input("Location", value=meta.get("location", ""))
-
-                    st.caption("ハードウェア冗長・インベントリ")
-                    h1, h2, h3 = st.columns([1, 1, 2])
-                    with h1:
-                        new_psu = st.number_input("PSU数", min_value=0, value=hw.get("psu_count", 1))
-                    with h2:
-                        new_fan = st.number_input("FAN数", min_value=0, value=hw.get("fan_count", 0))
-                    with h3:
-                        st.info("💡 PSUやFANの数は、RCA分析時のハードウェア障害判定に使用されます。")
-
-                    if st.form_submit_button("💾 保存", type="primary"):
-                        st.session_state.devices[dev_id]["type"] = new_type
-                        st.session_state.devices[dev_id]["metadata"] = {
-                            "vendor": new_vend,
-                            "model": new_model,
-                            "location": new_loc,
-                            "hw_inventory": {
-                                "psu_count": int(new_psu),
-                                "fan_count": int(new_fan)
-                            }
-                        }
-                        st.session_state.editing_device = None
-                        st.rerun()
+                        c_save, c_cancel = st.columns([1, 1])
+                        with c_save:
+                            if st.form_submit_button("💾 保存", type="primary", use_container_width=True):
+                                st.session_state.devices[dev_id]["type"] = new_type
+                                st.session_state.devices[dev_id]["metadata"] = {
+                                    "vendor": new_vend,
+                                    "model": new_model,
+                                    "location": new_loc,
+                                    "hw_inventory": {"psu_count": int(new_psu), "fan_count": int(new_fan)}
+                                }
+                                st.session_state.editing_device = None
+                                st.rerun()
+                        with c_cancel:
+                            if st.form_submit_button("キャンセル", use_container_width=True):
+                                st.session_state.editing_device = None
+                                st.rerun()
 
 def render_data_io():
     """JSON Import/Export"""
