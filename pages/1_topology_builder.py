@@ -231,17 +231,13 @@ def connection_dialog(source_id: str, mode: str):
     label = "下位(ダウンリンク)" if mode == "uplink" else "ピア(対等)"
     st.write(f"**{source_id}** からの **{label}** 接続先を選択してください。")
     
-    # 【改修箇所】既に接続済み（親、子、既存ピア）のデバイスをリストアップして除外する
     connected_targets = set()
     for c in st.session_state.connections:
-        # source_id が「from」側にある場合、相手は「to」
         if c["from"] == source_id:
             connected_targets.add(c["to"])
-        # source_id が「to」側にある場合、相手は「from」
         if c["to"] == source_id:
             connected_targets.add(c["from"])
             
-    # 自分自身と、既に接続済みのデバイスを除外してリスト化
     candidates = [d for d in st.session_state.devices.keys() 
                   if d != source_id and d not in connected_targets]
     
@@ -253,16 +249,13 @@ def connection_dialog(source_id: str, mode: str):
 
     target_id = st.selectbox("接続先デバイス", candidates)
     
-    # 接続ボタン
     if st.button("接続を作成", type="primary", use_container_width=True):
-        # 1. 念のための既存接続チェック
         exists = any(
             (c["from"] == source_id and c["to"] == target_id) or
             (c["from"] == target_id and c["to"] == source_id)
             for c in st.session_state.connections
         )
         
-        # 2. 矛盾チェック
         lineage_conflict = False
         if mode == "peer":
             if check_lineage(source_id, target_id):
@@ -274,8 +267,6 @@ def connection_dialog(source_id: str, mode: str):
             st.error("⚠️ 論理矛盾: 親子関係にあるノード同士をピア接続することはできません。")
         else:
             if mode == "uplink":
-                # Uplink: Child(from) -> Parent(to)
-                # 操作は Parent(source) -> Child(target) なので、保存時は Child=target, Parent=source
                 st.session_state.connections.append({
                     "from": target_id,
                     "to": source_id,
@@ -355,23 +346,30 @@ def render_device_list():
 
                 with st.popover("⚙️", use_container_width=True):
                     
-                    # 1. 詳細・編集
+                    # --- 【改修箇所】ヘッダーと閉じるボタンを追加 ---
+                    c_head1, c_head2 = st.columns([3, 2])
+                    with c_head1:
+                        st.markdown("**メニュー**")
+                    with c_head2:
+                        # 閉じるボタン（クリックでRerun -> ポップアップが閉じる）
+                        if st.button("✖ 閉じる", key=f"close_{dev_id}", use_container_width=True):
+                            st.rerun()
+                    st.divider()
+                    # -------------------------------------------
+
                     btn_label = "📝 閉じる" if is_editing else "📝 詳細・編集"
                     if st.button(btn_label, key=f"edit_{dev_id}", use_container_width=True):
                         st.session_state.editing_device = None if is_editing else dev_id
                         st.rerun()
                     
-                    # 2. 下位接続
                     if st.button("↓ 下位接続", key=f"down_{dev_id}", use_container_width=True):
                         connection_dialog(dev_id, "uplink")
                     
-                    # 3. ピア接続
                     if st.button("→ ピア接続", key=f"peer_{dev_id}", use_container_width=True):
                         connection_dialog(dev_id, "peer")
 
                     st.divider()
 
-                    # 4. 削除
                     if st.button("🗑️ 削除", key=f"del_{dev_id}", type="primary", use_container_width=True):
                         del st.session_state.devices[dev_id]
                         st.session_state.connections = [c for c in st.session_state.connections 
@@ -383,18 +381,21 @@ def render_device_list():
                 st.markdown("---")
                 with st.form(key=f"form_{dev_id}"):
                     st.caption("基本情報")
-                    f1, f2, f3, f4 = st.columns(4)
-                    with f1:
+                    
+                    row1_c1, row1_c2 = st.columns(2)
+                    with row1_c1:
                         curr_type = dev.get("type", "SWITCH")
                         new_type = st.selectbox("Type", list(DEVICE_TYPES.keys()), 
                                                 index=list(DEVICE_TYPES.keys()).index(curr_type) if curr_type in DEVICE_TYPES else 0)
-                    with f2:
+                    with row1_c2:
                         curr_vend = meta.get("vendor", "")
                         new_vend = st.selectbox("Vendor", [""] + VENDORS, 
                                                 index=(VENDORS.index(curr_vend)+1) if curr_vend in VENDORS else 0)
-                    with f3:
+
+                    row2_c1, row2_c2 = st.columns(2)
+                    with row2_c1:
                         new_model = st.text_input("Model", value=meta.get("model", ""))
-                    with f4:
+                    with row2_c2:
                         new_loc = st.text_input("Location", value=meta.get("location", ""))
 
                     st.caption("ハードウェア冗長・インベントリ")
