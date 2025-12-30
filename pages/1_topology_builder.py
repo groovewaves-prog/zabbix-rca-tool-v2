@@ -32,8 +32,7 @@ def init_session():
         st.session_state.devices = {}
     if "connections" not in st.session_state:
         st.session_state.connections = []
-    if "connect_mode" not in st.session_state:
-        st.session_state.connect_mode = None 
+    # connect_mode はダイアログ化に伴い廃止
     if "editing_device" not in st.session_state:
         st.session_state.editing_device = None
 
@@ -46,23 +45,19 @@ def calculate_layers() -> Dict[str, int]:
     if not devices:
         return {}
     
-    # 子ノードを特定
     children = set()
     for conn in connections:
         if conn.get("type") == "uplink":
-            # Uplink: Child(from) -> Parent(to)
             children.add(conn["from"])
             
-    # 親を持たないノードがルート
     root_nodes = [d for d in devices.keys() if d not in children]
     if not root_nodes and devices:
-        root_nodes = [list(devices.keys())[0]] # 循環回避用
+        root_nodes = [list(devices.keys())[0]]
         
     layers = {}
     queue = [(node, 1) for node in root_nodes]
     visited = set()
     
-    # 親 -> 子のマッピング
     children_map = {}
     for conn in connections:
         if conn.get("type") == "uplink":
@@ -88,14 +83,9 @@ def calculate_layers() -> Dict[str, int]:
     return layers
 
 def check_lineage(dev_a: str, dev_b: str) -> bool:
-    """
-    dev_a と dev_b の間に親子（祖先・子孫）関係があるかチェックする。
-    ピア接続を作成する際の矛盾防止用。
-    Returns: True if related (connection forbidden), False if safe.
-    """
+    """親子関係チェック（循環参照・矛盾防止）"""
     connections = st.session_state.connections
     
-    # 親マップ構築: child -> [parents]
     parent_map = {}
     for conn in connections:
         if conn["type"] == "uplink":
@@ -104,7 +94,6 @@ def check_lineage(dev_a: str, dev_b: str) -> bool:
             if child not in parent_map: parent_map[child] = []
             parent_map[child].append(parent)
 
-    # 特定のノードの全祖先を取得する関数
     def get_ancestors(node):
         ancestors = set()
         queue = [node]
@@ -113,7 +102,6 @@ def check_lineage(dev_a: str, dev_b: str) -> bool:
             curr = queue.pop(0)
             if curr in visited: continue
             visited.add(curr)
-            
             parents = parent_map.get(curr, [])
             for p in parents:
                 ancestors.add(p)
@@ -123,15 +111,13 @@ def check_lineage(dev_a: str, dev_b: str) -> bool:
     ancestors_a = get_ancestors(dev_a)
     ancestors_b = get_ancestors(dev_b)
 
-    # AがBの祖先、またはBがAの祖先である場合
     if dev_b in ancestors_a or dev_a in ancestors_b:
         return True
-        
     return False
 
 # ==================== vis.js HTML ====================
 def generate_visjs_html() -> str:
-    """vis.jsのHTML生成（アイコンなし、テキストのみ）"""
+    """vis.jsのHTML生成"""
     devices = st.session_state.devices
     connections = st.session_state.connections
     
@@ -149,7 +135,6 @@ def generate_visjs_html() -> str:
         vendor = dev.get("metadata", {}).get("vendor") or ""
         layer = layers.get(dev_id, 1)
         
-        # ラベル: アイコン削除、IDとベンダーのみ
         label = f"{dev_id}"
         if vendor:
             label += f"\\n({vendor})"
@@ -182,7 +167,6 @@ def generate_visjs_html() -> str:
                 "width": 2,
             })
         else:
-            # Peer接続: 黄色い点線
             edges_data.append({
                 "from": conn["from"],
                 "to": conn["to"],
@@ -242,10 +226,65 @@ def generate_visjs_html() -> str:
     </html>
     """
 
+# ==================== ダイアログ (Modal) ====================
+# これにより、接続画面が中央にポップアップし、操作性を劇的に改善します
+@st.dialog("接続設定")
+def connection_dialog(source_id: str, mode: str):
+    label = "下位(ダウンリンク)" if mode == "uplink" else "ピア(対等)"
+    st.write(f"**{source_id}** からの **{label}** 接続先を選択してください。")
+    
+    # 自分自身を除くデバイスリスト
+    candidates = [d for d in st.session_state.devices.keys() if d != source_id]
+    
+    if not candidates:
+        st.warning("接続可能な他のデバイスがありません。")
+        if st.button("閉じる"):
+            st.rerun()
+        return
+
+    target_id = st.selectbox("接続先デバイス", candidates)
+    
+    # 接続ボタン
+    if st.button("接続を作成", type="primary", use_container_width=True):
+        # 1. 既存接続チェック
+        exists = any(
+            (c["from"] == source_id and c["to"] == target_id) or
+            (c["from"] == target_id and c["to"] == source_id)
+            for c in st.session_state.connections
+        )
+        
+        # 2. 矛盾チェック
+        lineage_conflict = False
+        if mode == "peer":
+            if check_lineage(source_id, target_id):
+                lineage_conflict = True
+        
+        if exists:
+            st.error("既に接続されています")
+        elif lineage_conflict:
+            st.error("⚠️ 論理矛盾: 親子関係にあるノード同士をピア接続することはできません。")
+        else:
+            if mode == "uplink":
+                # Uplink: Child(from) -> Parent(to)
+                # 操作は Parent(source) -> Child(target) なので、保存時は Child=target, Parent=source
+                st.session_state.connections.append({
+                    "from": target_id,
+                    "to": source_id,
+                    "type": "uplink"
+                })
+            else:
+                st.session_state.connections.append({
+                    "from": source_id,
+                    "to": target_id,
+                    "type": "peer"
+                })
+            st.success("接続しました")
+            st.rerun()
+
 # ==================== UIコンポーネント ====================
 
 def render_add_device():
-    """デバイス追加（ID入力のみ）"""
+    """デバイス追加"""
     with st.expander("➕ デバイス追加", expanded=len(st.session_state.devices) == 0):
         c1, c2 = st.columns([3, 1])
         with c1:
@@ -255,7 +294,6 @@ def render_add_device():
             st.write("")
             if st.button("追加", type="primary", use_container_width=True):
                 if new_id and new_id not in st.session_state.devices:
-                    # 初期データ構造（JSON準拠）
                     st.session_state.devices[new_id] = {
                         "type": "SWITCH", 
                         "metadata": {
@@ -269,81 +307,16 @@ def render_add_device():
                     st.rerun()
                 elif new_id in st.session_state.devices:
                     st.error("ID重複")
-                else:
-                    st.error("IDを入力してください")
-
-def render_connect_mode():
-    """接続モード管理"""
-    if not st.session_state.connect_mode:
-        return
-
-    mode = st.session_state.connect_mode
-    src = mode["source"]
-    conn_type = mode["mode"]
-    
-    label = "下位(ダウンリンク)" if conn_type == "uplink" else "ピア(対等)"
-    st.info(f"🔗 **接続作成中**: {src} から {label} 接続")
-    
-    candidates = [d for d in st.session_state.devices.keys() if d != src]
-    
-    c1, c2, c3 = st.columns([3, 1, 1])
-    with c1:
-        dst = st.selectbox("接続先を選択", [""] + candidates, key="conn_dst")
-    
-    with c2:
-        st.write("")
-        st.write("")
-        if st.button("接続", type="primary", disabled=not dst, use_container_width=True):
-            # 1. 既存接続チェック
-            exists = any(
-                (c["from"] == src and c["to"] == dst) or
-                (c["from"] == dst and c["to"] == src)
-                for c in st.session_state.connections
-            )
-            
-            # 2. 矛盾チェック（ピア接続しようとしているのに上下関係があるなど）
-            lineage_conflict = False
-            if conn_type == "peer":
-                if check_lineage(src, dst):
-                    lineage_conflict = True
-            
-            if exists:
-                st.warning("既に接続されています")
-            elif lineage_conflict:
-                st.error("⚠️ 論理矛盾: 親子(上下)関係にあるノード同士をピア接続することはできません。")
-            else:
-                if conn_type == "uplink":
-                    # Uplink: Child(from) -> Parent(to)
-                    # 操作は Parent(src) -> Child(dst) なので、保存時は逆にする
-                    st.session_state.connections.append({
-                        "from": dst,
-                        "to": src,
-                        "type": "uplink"
-                    })
-                else:
-                    st.session_state.connections.append({
-                        "from": src,
-                        "to": dst,
-                        "type": "peer"
-                    })
-                st.session_state.connect_mode = None
-                st.rerun()
-
-    with c3:
-        st.write("")
-        st.write("")
-        if st.button("キャンセル", use_container_width=True):
-            st.session_state.connect_mode = None
-            st.rerun()
 
 def render_device_list():
-    """デバイス一覧・詳細編集"""
+    """デバイス一覧・操作"""
     if not st.session_state.devices:
         return
 
     st.subheader("📋 デバイス操作")
     
     layers = calculate_layers()
+    # 表示順: レイヤー順 -> 名前順
     sorted_devs = sorted(st.session_state.devices.keys(), key=lambda x: (layers.get(x, 99), x))
     
     for dev_id in sorted_devs:
@@ -351,19 +324,14 @@ def render_device_list():
         meta = dev.get("metadata", {})
         hw = meta.get("hw_inventory", {})
         
-        # カードコンテナ
         with st.container(border=True):
-            # --- 【改修箇所】ヘッダーレイアウトを2カラムに変更 ---
-            # 左側（情報）: 右側（メニュー） = 5 : 1
             col_info, col_menu = st.columns([5, 1])
             
             with col_info:
                 st.markdown(f"**{dev_id}** (L{layers.get(dev_id,1)})")
-                # サマリー情報の表示（ハードウェア冗長性など）
                 info_badges = []
                 if meta.get("vendor"): info_badges.append(meta["vendor"])
                 if meta.get("model"): info_badges.append(meta["model"])
-                # 冗長性情報のバッジ化
                 psu = hw.get("psu_count", 0)
                 fan = hw.get("fan_count", 0)
                 if psu > 0: info_badges.append(f"⚡PSU:{psu}")
@@ -374,85 +342,73 @@ def render_device_list():
                 else:
                     st.caption("No details")
 
-            # --- 【改修箇所】メニューボタン（ポップオーバー化） ---
             with col_menu:
-                is_disabled = st.session_state.connect_mode is not None
                 is_editing = (st.session_state.editing_device == dev_id)
 
-                # 「⚙️」アイコンの中にボタンを収納
+                # ポップオーバーメニュー
                 with st.popover("⚙️", use_container_width=True):
                     
-                    # 1. 詳細編集ボタン
+                    # 1. 詳細・編集
                     btn_label = "📝 閉じる" if is_editing else "📝 詳細・編集"
-                    if st.button(btn_label, key=f"edit_{dev_id}", disabled=is_disabled, use_container_width=True):
+                    if st.button(btn_label, key=f"edit_{dev_id}", use_container_width=True):
                         st.session_state.editing_device = None if is_editing else dev_id
                         st.rerun()
                     
-                    # 2. 下位接続ボタン
-                    if st.button("↓ 下位接続", key=f"down_{dev_id}", disabled=is_disabled, use_container_width=True):
-                        st.session_state.connect_mode = {"source": dev_id, "mode": "uplink"}
-                        st.rerun()
+                    # 2. 下位接続 (ダイアログ起動)
+                    # ここで `disabled` を削除しました。いつでも押せます。
+                    if st.button("↓ 下位接続", key=f"down_{dev_id}", use_container_width=True):
+                        connection_dialog(dev_id, "uplink")
                     
-                    # 3. ピア接続ボタン
-                    if st.button("→ ピア接続", key=f"peer_{dev_id}", disabled=is_disabled, use_container_width=True):
-                        st.session_state.connect_mode = {"source": dev_id, "mode": "peer"}
-                        st.rerun()
+                    # 3. ピア接続 (ダイアログ起動)
+                    if st.button("→ ピア接続", key=f"peer_{dev_id}", use_container_width=True):
+                        connection_dialog(dev_id, "peer")
 
-                    st.divider() # 誤操作防止の区切り線
+                    st.divider()
 
-                    # 4. 削除ボタン
-                    if st.button("🗑️ 削除", key=f"del_{dev_id}", type="primary", disabled=is_disabled, use_container_width=True):
+                    # 4. 削除
+                    if st.button("🗑️ 削除", key=f"del_{dev_id}", type="primary", use_container_width=True):
                         del st.session_state.devices[dev_id]
+                        # 関連する接続も削除
                         st.session_state.connections = [c for c in st.session_state.connections 
                                                       if c["from"] != dev_id and c["to"] != dev_id]
                         if is_editing: st.session_state.editing_device = None
                         st.rerun()
 
-            # --- 詳細編集フォーム（既存ロジックのまま） ---
+            # 編集フォーム
             if is_editing:
                 st.markdown("---")
                 with st.form(key=f"form_{dev_id}"):
                     st.caption("基本情報")
                     f1, f2, f3, f4 = st.columns(4)
                     with f1:
-                        # タイプ
                         curr_type = dev.get("type", "SWITCH")
                         new_type = st.selectbox("Type", list(DEVICE_TYPES.keys()), 
                                                 index=list(DEVICE_TYPES.keys()).index(curr_type) if curr_type in DEVICE_TYPES else 0)
                     with f2:
-                        # ベンダー
                         curr_vend = meta.get("vendor", "")
                         new_vend = st.selectbox("Vendor", [""] + VENDORS, 
                                                 index=(VENDORS.index(curr_vend)+1) if curr_vend in VENDORS else 0)
                     with f3:
-                        # モデル名 (JSON: model)
                         new_model = st.text_input("Model", value=meta.get("model", ""))
                     with f4:
-                        # 設置場所 (JSON: location)
                         new_loc = st.text_input("Location", value=meta.get("location", ""))
 
                     st.caption("ハードウェア冗長・インベントリ")
                     h1, h2, h3 = st.columns([1, 1, 2])
                     with h1:
-                        # PSU数 (JSON: hw_inventory.psu_count)
-                        new_psu = st.number_input("電源ユニット(PSU)数", min_value=0, value=hw.get("psu_count", 1))
+                        new_psu = st.number_input("PSU数", min_value=0, value=hw.get("psu_count", 1))
                     with h2:
-                        # FAN数 (JSON: hw_inventory.fan_count)
-                        new_fan = st.number_input("ファンモジュール数", min_value=0, value=hw.get("fan_count", 0))
+                        new_fan = st.number_input("FAN数", min_value=0, value=hw.get("fan_count", 0))
                     with h3:
                         st.info("💡 PSUやFANの数は、RCA分析時のハードウェア障害判定に使用されます。")
 
-                    # 保存
-                    if st.form_submit_button("💾 変更を保存", type="primary"):
+                    if st.form_submit_button("💾 保存", type="primary"):
                         st.session_state.devices[dev_id]["type"] = new_type
                         st.session_state.devices[dev_id]["metadata"] = {
                             "vendor": new_vend,
                             "model": new_model,
                             "location": new_loc,
-                            "hw_inventory": {
-                                "psu_count": int(new_psu),
-                                "fan_count": int(new_fan)
-                            }
+                            "hw_inventory": {"psu_count": int(new_psu), "fan_count": int(new_fan)}
                         }
                         st.session_state.editing_device = None
                         st.rerun()
@@ -464,17 +420,13 @@ def render_data_io():
     
     c1, c2 = st.columns(2)
     with c1:
-        # Export用データ生成
         export_data = {
             "topology": {},
-            "redundancy_groups": {}, # 今回は簡易実装のため空または自動生成の余地あり
+            "redundancy_groups": {},
             "metadata": {"version": "2.0"}
         }
-        
-        # JSON構造に合わせて変換
         layers = calculate_layers()
         for d_id, d_data in st.session_state.devices.items():
-            # 親IDリストの抽出
             parents = [c["to"] for c in st.session_state.connections 
                       if c["from"] == d_id and c["type"] == "uplink"]
             
@@ -495,9 +447,7 @@ def render_data_io():
             if st.button("適用", type="primary"):
                 try:
                     data = json.load(uploaded)
-                    # full_topology.json形式に対応
                     topo = data.get("topology", {})
-                    
                     new_devs = {}
                     new_conns = []
                     
@@ -506,11 +456,9 @@ def render_data_io():
                             "type": d_val.get("type", "SWITCH"),
                             "metadata": d_val.get("metadata", {})
                         }
-                        # Uplink復元
                         p_ids = d_val.get("parent_ids", [])
                         if not p_ids and d_val.get("parent_id"):
                              p_ids = [d_val.get("parent_id")]
-                        
                         for p_id in p_ids:
                             new_conns.append({"from": d_id, "to": p_id, "type": "uplink"})
                             
@@ -529,7 +477,8 @@ def main():
     
     components.html(generate_visjs_html(), height=480)
     
-    render_connect_mode()
+    # 接続モードのエリア描画関数(render_connect_mode)は削除しました
+    # 代わりにモーダルダイアログを使用します
     
     col_left, col_right = st.columns([1, 1])
     with col_left:
@@ -537,7 +486,6 @@ def main():
         render_device_list()
         
     with col_right:
-        # 簡易接続リスト表示
         if st.session_state.connections:
             with st.expander(f"🔗 接続リスト ({len(st.session_state.connections)})"):
                 for i, c in enumerate(st.session_state.connections):
