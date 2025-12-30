@@ -12,7 +12,6 @@ st.set_page_config(
 )
 
 # ==================== 定数 ====================
-# アイコンは削除し、色とラベルのみ定義
 DEVICE_TYPES = {
     "ROUTER": {"color": "#667eea", "label": "Router"},
     "SWITCH": {"color": "#11998e", "label": "Switch"},
@@ -354,10 +353,11 @@ def render_device_list():
         
         # カードコンテナ
         with st.container(border=True):
-            # --- ヘッダー行: ID, スペック要約, アクションボタン ---
-            c1, c2, c3, c4, c5 = st.columns([3, 1.5, 1.5, 1.5, 0.8])
+            # --- 【改修箇所】ヘッダーレイアウトを2カラムに変更 ---
+            # 左側（情報）: 右側（メニュー） = 5 : 1
+            col_info, col_menu = st.columns([5, 1])
             
-            with c1:
+            with col_info:
                 st.markdown(f"**{dev_id}** (L{layers.get(dev_id,1)})")
                 # サマリー情報の表示（ハードウェア冗長性など）
                 info_badges = []
@@ -374,31 +374,41 @@ def render_device_list():
                 else:
                     st.caption("No details")
 
-            is_disabled = st.session_state.connect_mode is not None
-            is_editing = (st.session_state.editing_device == dev_id)
-            
-            with c2:
-                btn_label = "📝 閉じる" if is_editing else "📝 詳細"
-                if st.button(btn_label, key=f"edit_{dev_id}", disabled=is_disabled, use_container_width=True):
-                    st.session_state.editing_device = None if is_editing else dev_id
-                    st.rerun()
-            with c3:
-                if st.button("↓ 下位", key=f"down_{dev_id}", disabled=is_disabled, use_container_width=True):
-                    st.session_state.connect_mode = {"source": dev_id, "mode": "uplink"}
-                    st.rerun()
-            with c4:
-                if st.button("→ ピア", key=f"peer_{dev_id}", disabled=is_disabled, use_container_width=True):
-                    st.session_state.connect_mode = {"source": dev_id, "mode": "peer"}
-                    st.rerun()
-            with c5:
-                if st.button("🗑️", key=f"del_{dev_id}", disabled=is_disabled):
-                    del st.session_state.devices[dev_id]
-                    st.session_state.connections = [c for c in st.session_state.connections 
-                                                  if c["from"] != dev_id and c["to"] != dev_id]
-                    if is_editing: st.session_state.editing_device = None
-                    st.rerun()
+            # --- 【改修箇所】メニューボタン（ポップオーバー化） ---
+            with col_menu:
+                is_disabled = st.session_state.connect_mode is not None
+                is_editing = (st.session_state.editing_device == dev_id)
 
-            # --- 詳細編集フォーム ---
+                # 「⚙️」アイコンの中にボタンを収納
+                with st.popover("⚙️", use_container_width=True):
+                    
+                    # 1. 詳細編集ボタン
+                    btn_label = "📝 閉じる" if is_editing else "📝 詳細・編集"
+                    if st.button(btn_label, key=f"edit_{dev_id}", disabled=is_disabled, use_container_width=True):
+                        st.session_state.editing_device = None if is_editing else dev_id
+                        st.rerun()
+                    
+                    # 2. 下位接続ボタン
+                    if st.button("↓ 下位接続", key=f"down_{dev_id}", disabled=is_disabled, use_container_width=True):
+                        st.session_state.connect_mode = {"source": dev_id, "mode": "uplink"}
+                        st.rerun()
+                    
+                    # 3. ピア接続ボタン
+                    if st.button("→ ピア接続", key=f"peer_{dev_id}", disabled=is_disabled, use_container_width=True):
+                        st.session_state.connect_mode = {"source": dev_id, "mode": "peer"}
+                        st.rerun()
+
+                    st.divider() # 誤操作防止の区切り線
+
+                    # 4. 削除ボタン
+                    if st.button("🗑️ 削除", key=f"del_{dev_id}", type="primary", disabled=is_disabled, use_container_width=True):
+                        del st.session_state.devices[dev_id]
+                        st.session_state.connections = [c for c in st.session_state.connections 
+                                                      if c["from"] != dev_id and c["to"] != dev_id]
+                        if is_editing: st.session_state.editing_device = None
+                        st.rerun()
+
+            # --- 詳細編集フォーム（既存ロジックのまま） ---
             if is_editing:
                 st.markdown("---")
                 with st.form(key=f"form_{dev_id}"):
@@ -408,12 +418,12 @@ def render_device_list():
                         # タイプ
                         curr_type = dev.get("type", "SWITCH")
                         new_type = st.selectbox("Type", list(DEVICE_TYPES.keys()), 
-                                              index=list(DEVICE_TYPES.keys()).index(curr_type) if curr_type in DEVICE_TYPES else 0)
+                                                index=list(DEVICE_TYPES.keys()).index(curr_type) if curr_type in DEVICE_TYPES else 0)
                     with f2:
                         # ベンダー
                         curr_vend = meta.get("vendor", "")
                         new_vend = st.selectbox("Vendor", [""] + VENDORS, 
-                                              index=(VENDORS.index(curr_vend)+1) if curr_vend in VENDORS else 0)
+                                                index=(VENDORS.index(curr_vend)+1) if curr_vend in VENDORS else 0)
                     with f3:
                         # モデル名 (JSON: model)
                         new_model = st.text_input("Model", value=meta.get("model", ""))
