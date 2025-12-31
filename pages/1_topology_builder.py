@@ -86,7 +86,6 @@ def calculate_layers() -> Dict[str, int]:
 def check_lineage(dev_a: str, dev_b: str) -> bool:
     """親子関係チェック"""
     connections = st.session_state.connections
-    
     parent_map = {}
     for conn in connections:
         if conn["type"] == "uplink":
@@ -347,7 +346,7 @@ def render_add_device():
                             "model": "",
                             "location": "",
                             "hw_inventory": {"psu_count": 1, "fan_count": 0},
-                            "network_config": {"lag_enabled": False, "vlans": []} # 初期値
+                            "network_config": {"lag_enabled": False, "vlans": []}
                         }
                     }
                     st.success(f"追加: {new_id}")
@@ -360,21 +359,35 @@ def render_device_list():
     if not st.session_state.devices:
         return
 
-    layers = calculate_layers()
-    sorted_devs = sorted(st.session_state.devices.keys(), key=lambda x: (
-        layers.get(x, 1), 
-        x
-    ))
+    st.subheader("📋 デバイス操作")
 
-    # チェックボックスの状態収集
+    # 【機能追加】検索フィルター
+    search_query = st.text_input("🔍 デバイス検索", placeholder="名前でフィルタ...", label_visibility="collapsed")
+
+    # --- 接続済みデバイスIDのセットを作成 (孤立判定用) ---
+    connected_ids = set()
+    for c in st.session_state.connections:
+        connected_ids.add(c["from"])
+        connected_ids.add(c["to"])
+
+    layers = calculate_layers()
+    all_devs = sorted(st.session_state.devices.keys(), key=lambda x: (layers.get(x, 1), x))
+    
+    # 検索フィルター適用
+    if search_query:
+        sorted_devs = [d for d in all_devs if search_query.lower() in d.lower()]
+    else:
+        sorted_devs = all_devs
+
+    # チェックボックスの状態収集 (Action Panel用)
+    # 表示されているリストだけでなく、非表示のものも含めて選択状態を維持するかは要件次第だが、
+    # ここでは一貫性のため session_state から全チェックを取得
     current_selected = []
-    for dev_id in sorted_devs:
+    for dev_id in st.session_state.devices.keys():
         if st.session_state.get(f"chk_{dev_id}", False):
             current_selected.append(dev_id)
     
     # --- Action Panel ---
-    st.markdown("### 📋 デバイス操作")
-    
     with st.container(border=True):
         if not current_selected:
             st.info("👇 下のリストから操作したいデバイスにチェックを入れてください")
@@ -411,11 +424,17 @@ def render_device_list():
 
     # --- デバイスリスト ---
     with st.container(height=500):
+        if not sorted_devs:
+            st.write("該当するデバイスはありません。")
+
         for dev_id in sorted_devs:
             dev = st.session_state.devices[dev_id]
             meta = dev.get("metadata", {})
             hw = meta.get("hw_inventory", {})
             net = meta.get("network_config", {})
+            
+            # 【機能追加】孤立ノード判定
+            is_isolated = dev_id not in connected_ids
             
             c_check, c_card = st.columns([0.5, 6])
             
@@ -427,10 +446,14 @@ def render_device_list():
                 with st.container(border=True):
                     st.markdown(f"**{dev_id}** (L{layers.get(dev_id,1)})")
                     info_badges = []
+                    
+                    # 孤立マークを最優先で表示
+                    if is_isolated:
+                        info_badges.append("⚠️ 未接続")
+
                     if meta.get("vendor"): info_badges.append(meta["vendor"])
                     if meta.get("model"): info_badges.append(meta["model"])
                     
-                    # バッジ情報の表示強化
                     psu = hw.get("psu_count", 0)
                     if psu > 0: info_badges.append(f"⚡PSU:{psu}")
                     
@@ -442,16 +465,14 @@ def render_device_list():
                     else:
                         st.caption("No details")
 
-            # --- 詳細編集パネル（タブ化による機能拡張） ---
+            # --- 詳細編集パネル ---
             if st.session_state.editing_device == dev_id:
                 with st.container(border=True):
                     st.info(f"📝 **{dev_id}** を設定中...")
                     
                     with st.form(key=f"form_{dev_id}"):
-                        # タブでカテゴリ分け
                         tab1, tab2, tab3 = st.tabs(["基本情報", "ハードウェア/モジュール", "論理/ネットワーク"])
                         
-                        # --- Tab 1: 基本情報 ---
                         with tab1:
                             row1_c1, row1_c2 = st.columns(2)
                             with row1_c1:
@@ -469,7 +490,6 @@ def render_device_list():
                             with row2_c2:
                                 new_loc = st.text_input("Location", value=meta.get("location", ""))
 
-                        # --- Tab 2: ハードウェア/モジュール ---
                         with tab2:
                             h1, h2 = st.columns(2)
                             with h1:
@@ -481,10 +501,8 @@ def render_device_list():
                             curr_modules = hw.get("modules", "")
                             new_modules = st.text_area("モジュール一覧 (カンマ区切りで入力)", 
                                                        value=curr_modules, 
-                                                       placeholder="例: LineCard-10G, Supervisor-Engine-2",
-                                                       help="搭載されているラインカードや拡張モジュールを入力してください")
+                                                       placeholder="例: LineCard-10G, Supervisor-Engine-2")
 
-                        # --- Tab 3: 論理/ネットワーク ---
                         with tab3:
                             st.markdown("##### 冗長化設定")
                             new_lag = st.checkbox("LAG (Link Aggregation) 構成", value=net.get("lag_enabled", False))
@@ -494,9 +512,7 @@ def render_device_list():
                             new_vlans = st.text_input("VLAN ID (カンマ区切り)", 
                                                       value=curr_vlans,
                                                       placeholder="例: 10, 20, 100-105")
-                            st.caption("※ ここに入力されたVLAN情報は、将来的な論理トポロジー分析に使用されます。")
 
-                        # 保存・キャンセル
                         st.markdown("---")
                         c_save, c_cancel = st.columns([1, 1])
                         with c_save:
@@ -593,22 +609,17 @@ def main():
         render_device_list()
         
     with col_right:
-        # 【改修箇所】接続リストのフィルタリング
-        # 選択されたデバイスがある場合、そのデバイスに関連する接続のみを表示
-        
-        # チェックされているデバイスIDを取得（Action Panelのロジックと同じ方法）
+        # 接続リストのフィルタリング
         layers = calculate_layers()
-        sorted_devs = sorted(st.session_state.devices.keys(), key=lambda x: (layers.get(x, 1), x))
+        all_devs = sorted(st.session_state.devices.keys(), key=lambda x: (layers.get(x, 1), x))
         current_selected = []
-        for dev_id in sorted_devs:
+        for dev_id in all_devs:
             if st.session_state.get(f"chk_{dev_id}", False):
                 current_selected.append(dev_id)
         
-        # フィルタリングロジック
         all_conns = st.session_state.connections
         
         if current_selected:
-            # 選択中のデバイスが含まれる接続のみ抽出
             display_conns = [
                 (i, c) for i, c in enumerate(all_conns)
                 if c["from"] in current_selected or c["to"] in current_selected
@@ -616,7 +627,6 @@ def main():
             header_text = f"🔗 関連する接続 ({len(display_conns)})"
             is_expanded = True
         else:
-            # 何も選択されていない場合は全件（デフォルトは閉じる）
             display_conns = [(i, c) for i, c in enumerate(all_conns)]
             header_text = f"🔗 全接続リスト ({len(display_conns)})"
             is_expanded = False
