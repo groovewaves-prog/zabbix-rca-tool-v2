@@ -204,6 +204,7 @@ def generate_visjs_html() -> str:
     nodes_json = json.dumps(nodes_data)
     edges_json = json.dumps(edges_data)
     
+    # 【改修箇所】vis.jsのオプション設定を変更してレイアウトを整える
     return f"""
     <!DOCTYPE html>
     <html>
@@ -226,17 +227,22 @@ def generate_visjs_html() -> str:
                     hierarchical: {{
                         enabled: true,
                         direction: 'UD',
-                        sortMethod: 'directed',
+                        sortMethod: 'hubsize', 
                         levelSeparation: 150,
-                        nodeSpacing: 200, 
-                        treeSpacing: 250,
+                        nodeSpacing: 180, 
+                        treeSpacing: 220,
                         blockShifting: true,
                         edgeMinimization: true,
                         parentCentralization: true,
                         shakeTowards: 'roots'
                     }}
                 }},
-                physics: {{ enabled: false }},
+                physics: {{ 
+                    enabled: false,
+                    hierarchicalRepulsion: {{
+                        nodeDistance: 180
+                    }}
+                }},
                 interaction: {{
                     dragNodes: false,
                     dragView: true,
@@ -361,10 +367,10 @@ def render_device_list():
 
     st.subheader("📋 デバイス操作")
 
-    # 【機能追加】検索フィルター
+    # 検索フィルター
     search_query = st.text_input("🔍 デバイス検索", placeholder="名前でフィルタ...", label_visibility="collapsed")
 
-    # --- 接続済みデバイスIDのセットを作成 (孤立判定用) ---
+    # 接続済みデバイスIDのセットを作成 (孤立判定用)
     connected_ids = set()
     for c in st.session_state.connections:
         connected_ids.add(c["from"])
@@ -373,21 +379,17 @@ def render_device_list():
     layers = calculate_layers()
     all_devs = sorted(st.session_state.devices.keys(), key=lambda x: (layers.get(x, 1), x))
     
-    # 検索フィルター適用
     if search_query:
         sorted_devs = [d for d in all_devs if search_query.lower() in d.lower()]
     else:
         sorted_devs = all_devs
 
-    # チェックボックスの状態収集 (Action Panel用)
-    # 表示されているリストだけでなく、非表示のものも含めて選択状態を維持するかは要件次第だが、
-    # ここでは一貫性のため session_state から全チェックを取得
     current_selected = []
     for dev_id in st.session_state.devices.keys():
         if st.session_state.get(f"chk_{dev_id}", False):
             current_selected.append(dev_id)
     
-    # --- Action Panel ---
+    # Action Panel
     with st.container(border=True):
         if not current_selected:
             st.info("👇 下のリストから操作したいデバイスにチェックを入れてください")
@@ -422,7 +424,7 @@ def render_device_list():
             if not is_single:
                 st.caption("※「接続」や「編集」は、1つのデバイスのみ選択している場合に有効になります。")
 
-    # --- デバイスリスト ---
+    # デバイスリスト
     with st.container(height=500):
         if not sorted_devs:
             st.write("該当するデバイスはありません。")
@@ -433,7 +435,6 @@ def render_device_list():
             hw = meta.get("hw_inventory", {})
             net = meta.get("network_config", {})
             
-            # 【機能追加】孤立ノード判定
             is_isolated = dev_id not in connected_ids
             
             c_check, c_card = st.columns([0.5, 6])
@@ -447,7 +448,6 @@ def render_device_list():
                     st.markdown(f"**{dev_id}** (L{layers.get(dev_id,1)})")
                     info_badges = []
                     
-                    # 孤立マークを最優先で表示
                     if is_isolated:
                         info_badges.append("⚠️ 未接続")
 
@@ -465,7 +465,7 @@ def render_device_list():
                     else:
                         st.caption("No details")
 
-            # --- 詳細編集パネル ---
+            # 詳細編集パネル
             if st.session_state.editing_device == dev_id:
                 with st.container(border=True):
                     st.info(f"📝 **{dev_id}** を設定中...")
