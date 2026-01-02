@@ -40,37 +40,66 @@ def init_session():
 
 # ==================== ロジック・計算 ====================
 def calculate_layers() -> Dict[str, int]:
-    """接続関係からレイヤー（Y軸）を自動計算（最長パス法）"""
+    """
+    【改修版】レイヤー計算ロジック
+    1. 最長パス法で親子関係に基づく深さを計算
+    2. ピア接続(peer)がある場合、接続同士のレイヤーを深い方に合わせる（同期）
+       これにより、親リンクが切れてもピアがいれば同じ階層に留まる。
+    """
     devices = st.session_state.devices
     connections = st.session_state.connections
     
     if not devices:
         return {}
     
-    # 全ノードを初期レイヤー1
+    # 1. 全ノードを初期レイヤー1に設定
     layers = {d: 1 for d in devices}
     
-    # 接続ノード判定
+    # 2. 接続情報の整理
+    uplinks = []
+    peers = []
     connected_nodes = set()
+    
     for c in connections:
         connected_nodes.add(c['from'])
         connected_nodes.add(c['to'])
+        if c['type'] == 'uplink':
+            uplinks.append(c)
+        else:
+            peers.append(c)
 
-    # レイヤーの深さを計算
-    for _ in range(len(devices)):
+    # 3. 反復計算 (十分な回数ループさせて収束させる)
+    # ノード数分回せば理論上、最深部まで伝播する
+    for _ in range(len(devices) + 2):
         changed = False
-        for c in connections:
-            if c['type'] == 'uplink':
-                parent = c['to']
-                child = c['from']
-                if parent in layers and child in layers:
-                    if layers[child] < layers[parent] + 1:
-                        layers[child] = layers[parent] + 1
-                        changed = True
+        
+        # A. 親子関係によるレイヤー押し下げ (Parent -> Child)
+        for c in uplinks:
+            parent = c['to']
+            child = c['from']
+            if parent in layers and child in layers:
+                if layers[child] < layers[parent] + 1:
+                    layers[child] = layers[parent] + 1
+                    changed = True
+        
+        # B. ピア接続によるレイヤー同期 (Peer <-> Peer)
+        # ピア同士は同じ高さ（低い方に合わせる=数値が大きい方）にする
+        for c in peers:
+            p1 = c['from']
+            p2 = c['to']
+            if p1 in layers and p2 in layers:
+                max_layer = max(layers[p1], layers[p2])
+                if layers[p1] != max_layer:
+                    layers[p1] = max_layer
+                    changed = True
+                if layers[p2] != max_layer:
+                    layers[p2] = max_layer
+                    changed = True
+                    
         if not changed:
             break
             
-    # 孤立ノードは Layer 0
+    # 4. 孤立ノード（リンクが1本もない）は強制的に Layer 0（最上段）へ
     for d in devices:
         if d not in connected_nodes:
             layers[d] = 0
@@ -79,23 +108,18 @@ def calculate_layers() -> Dict[str, int]:
 
 def calculate_positions(layers: Dict[str, int]) -> Dict[str, Dict[str, int]]:
     """
-    【アルゴリズム改善版】杉山アルゴリズムの重心法(Barycenter Method)を応用。
-    親ノードの位置に基づいて子ノードの並び順を決定し、エッジの交差を最小化・対称性を確保する。
+    【改修版】重心法 + 名前ソートによる配置決定
+    - 上のレイヤーの親の位置に基づいて、自分のX座標（並び順）を決める
+    - 親がいない、または同じ親を持つ場合は名前順でソートすることで、
+      「たすき掛け」構成でも左右対称にきれいに並ぶようにする。
     """
     positions = {}
     connections = st.session_state.connections
     
-    # 1. レイヤーごとにノードをグループ化
-    layer_map = {} # { 1: [nodeA, nodeB], 2: [nodeC]... }
-    max_layer = 0
-    for node, layer in layers.items():
-        if layer not in layer_map:
-            layer_map[layer] = []
-        layer_map[layer].append(node)
-        if layer > max_layer:
-            max_layer = layer
-
-    # 2. 親子関係マップの作成 (Child -> Parents)
+    # レイヤーの最大深度を取得
+    max_layer = max(layers.values()) if layers else 0
+    
+    # 親子関係マップ (Child -> Parents List)
     child_to_parents = {}
     for c in connections:
         if c['type'] == 'uplink':
@@ -105,67 +129,69 @@ def calculate_positions(layers: Dict[str, int]) -> Dict[str, Dict[str, int]]:
                 child_to_parents[child] = []
             child_to_parents[child].append(parent)
 
-    # 3. 座標計算定数
+    # レイヤーごとにノードをリスト化
+    nodes_by_layer = {}
+    for node, layer in layers.items():
+        if layer not in nodes_by_layer:
+            nodes_by_layer[layer] = []
+        nodes_by_layer[layer].append(node)
+
+    # 定数
     Y_SPACING = 150
-    X_SPACING = 220 # 少し広めにとる
+    X_SPACING = 220
 
-    # 4. レイヤー順にX座標を決定していく
-    # Layer 0 (孤立) と Layer 1 (ルート) は名前順で初期配置
-    for layer in [0, 1]:
-        if layer in layer_map:
-            # 名前順でソート
-            layer_map[layer].sort()
-            
-            # 配置
-            nodes = layer_map[layer]
-            count = len(nodes)
-            total_width = (count - 1) * X_SPACING
-            start_x = -total_width / 2
-            
-            for i, node in enumerate(nodes):
-                positions[node] = {"x": int(start_x + (i * X_SPACING)), "y": int(layer * Y_SPACING)}
-
-    # Layer 2以降: 親の座標の「重心」を計算してソート順を決める
-    for layer in range(2, max_layer + 1):
-        if layer not in layer_map:
+    # ----- 座標決定プロセス -----
+    
+    # Layer 0 (孤立) と Layer 1 (ルート群) は単純に名前順
+    for layer in range(max_layer + 1):
+        if layer not in nodes_by_layer:
             continue
             
-        nodes = layer_map[layer]
+        nodes = nodes_by_layer[layer]
         
-        # 各ノードの「重み（親のX座標の平均）」を計算
-        node_weights = []
-        for node in nodes:
-            parents = child_to_parents.get(node, [])
-            parent_x_sum = 0
-            valid_parents = 0
+        # ソートロジック
+        if layer <= 1:
+            # 上位レイヤーは名前順
+            nodes.sort()
+        else:
+            # 下位レイヤーは「親の重心」順 -> 「名前」順
+            # これにより四角形(Mesh)がきれいに開く
+            node_weights = []
+            for node in nodes:
+                parents = child_to_parents.get(node, [])
+                parent_x_sum = 0
+                valid_parents = 0
+                
+                for p in parents:
+                    # 親の座標が既に計算済みか確認
+                    if p in positions:
+                        parent_x_sum += positions[p]["x"]
+                        valid_parents += 1
+                
+                if valid_parents > 0:
+                    # 重心（親の平均X座標）
+                    weight = parent_x_sum / valid_parents
+                else:
+                    # 親がいない（または上のレイヤーにいない）場合は、
+                    # 現在の並び順を維持するために大きな値を仮置きするか、
+                    # 名前順にするために0などを設定
+                    weight = 0 
+                
+                node_weights.append((weight, node))
             
-            for p in parents:
-                if p in positions: # 親の座標が確定している場合
-                    parent_x_sum += positions[p]["x"]
-                    valid_parents += 1
-            
-            if valid_parents > 0:
-                avg_x = parent_x_sum / valid_parents
-            else:
-                # 親がいない、または上のレイヤーにいない場合は名前を重みにする(後ろに回す)
-                avg_x = 99999 
-            
-            node_weights.append((avg_x, node))
-        
-        # 重み（親の重心位置）順、次いで名前順にソート
-        # これにより、左の親の子は左に、右の親の子は右に、両方の親の子は真ん中に来る
-        node_weights.sort(key=lambda x: (x[0], x[1]))
-        sorted_nodes = [n[1] for n in node_weights]
-        
-        # 座標を確定
-        count = len(sorted_nodes)
+            # 重み(重心)でソートし、同点なら名前でソート
+            node_weights.sort(key=lambda x: (x[0], x[1]))
+            nodes = [n[1] for n in node_weights]
+
+        # 座標割り当て (センタリング)
+        count = len(nodes)
         total_width = (count - 1) * X_SPACING
         start_x = -total_width / 2
         
-        for i, node in enumerate(sorted_nodes):
-            x = start_x + (i * X_SPACING)
-            y = layer * Y_SPACING
-            positions[node] = {"x": int(x), "y": int(y)}
+        for i, node in enumerate(nodes):
+            x = int(start_x + (i * X_SPACING))
+            y = int(layer * Y_SPACING)
+            positions[node] = {"x": x, "y": y}
             
     return positions
 
@@ -236,7 +262,7 @@ def generate_visjs_html() -> str:
                    background:#f5f5f5;border-radius:8px;'>
                    📍 デバイスを追加してください</div>"""
     
-    # 座標計算を実行 (Barycenter Method)
+    # 座標計算を実行
     layers = calculate_layers()
     positions = calculate_positions(layers)
     
@@ -266,7 +292,7 @@ def generate_visjs_html() -> str:
             "shape": "box",
             "margin": 10,
             "shadow": True,
-            "physics": False
+            "physics": False 
         })
     
     edges_data = []
@@ -751,7 +777,6 @@ def main():
                     col_c1, col_c2 = st.columns([6,1])
                     with col_c1:
                         if c["type"] == "uplink":
-                            # 親 → 子 の表記に変更
                             st.markdown(f"**⬇️ 下位接続:** {c['to']} → {c['from']}")
                         else:
                             st.markdown(f"**↔️ ピア接続:** {c['from']} ↔ {c['to']}")
