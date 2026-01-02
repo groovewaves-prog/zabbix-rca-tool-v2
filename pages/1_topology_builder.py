@@ -152,8 +152,12 @@ def generate_visjs_html() -> str:
     
     layers = calculate_layers()
     
+    # 描画用のノードリスト生成（レイヤー順 -> 名前順でソートして安定化させる）
+    sorted_dev_ids = sorted(devices.keys(), key=lambda x: (layers.get(x, 1), x))
+    
     nodes_data = []
-    for dev_id, dev in devices.items():
+    for dev_id in sorted_dev_ids:
+        dev = devices[dev_id]
         dev_type = dev.get("type", "SWITCH")
         style = DEVICE_TYPES.get(dev_type, DEVICE_TYPES["SWITCH"])
         vendor = dev.get("metadata", {}).get("vendor") or ""
@@ -191,6 +195,7 @@ def generate_visjs_html() -> str:
                 "width": 2,
             })
         else:
+            # Peer接続: レイアウト計算から完全に除外するための設定
             edges_data.append({
                 "from": conn["from"],
                 "to": conn["to"],
@@ -198,13 +203,14 @@ def generate_visjs_html() -> str:
                 "dashes": [8, 8],
                 "arrows": "",
                 "width": 3,
-                "constraint": False
+                "constraint": False, # 階層レイアウト制約を無視
+                "physics": False     # 物理演算の影響も受けない
             })
     
     nodes_json = json.dumps(nodes_data)
     edges_json = json.dumps(edges_data)
     
-    # 【改修箇所】vis.jsのオプションを「幾何学的な整列」優先に変更
+    # 【改修箇所】vis.jsオプションを「幾何学的整列」優先に書き換え
     return f"""
     <!DOCTYPE html>
     <html>
@@ -226,20 +232,20 @@ def generate_visjs_html() -> str:
                 layout: {{
                     hierarchical: {{
                         enabled: true,
-                        direction: 'UD',       // 上から下へ
-                        sortMethod: 'directed',// 階層構造を厳密に守る
-                        levelSeparation: 150,  // 上下の間隔
-                        nodeSpacing: 250,      // 左右の間隔（広めに取る）
-                        treeSpacing: 300,      // 異なるツリー間の間隔
+                        direction: 'UD',        // 上から下へ
+                        sortMethod: 'directed', // 階層構造に厳密に従う
+                        levelSeparation: 150,   // 階層間の距離
+                        nodeSpacing: 250,       // ノード間の距離（広めにとる）
+                        treeSpacing: 300,       // ツリー間の距離
                         
-                        // ここが重要：配置を最適化しすぎず、構造通りに並べる設定
-                        blockShifting: false, 
-                        edgeMinimization: false,
-                        parentCentralization: true // 親を子の中心に配置する
+                        // 【重要】以下3つで「いびつさ」を強制補正する
+                        blockShifting: false,    // ノードを密集させる処理をOFF（左右対称になる）
+                        edgeMinimization: false, // エッジ長短縮処理をOFF（歪みを防ぐ）
+                        parentCentralization: true // 親を子の重心に配置する
                     }}
                 }},
                 physics: {{ 
-                    enabled: false // 物理演算を切って静的に配置（ふらつき防止）
+                    enabled: false // 物理演算をOFFにして静的に配置（ふらつき防止）
                 }},
                 interaction: {{
                     dragNodes: true,
@@ -602,6 +608,7 @@ def main():
         render_device_list()
         
     with col_right:
+        # 接続リストのフィルタリング
         layers = calculate_layers()
         all_devs = sorted(st.session_state.devices.keys(), key=lambda x: (layers.get(x, 1), x))
         current_selected = []
