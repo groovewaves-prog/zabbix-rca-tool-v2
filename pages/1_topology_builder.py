@@ -39,21 +39,23 @@ def init_session():
 
 # ==================== ロジック・計算 ====================
 def calculate_layers() -> Dict[str, int]:
-    """接続関係からレイヤーを自動計算"""
+    """接続関係からレイヤー（Y軸）を自動計算"""
     devices = st.session_state.devices
     connections = st.session_state.connections
     
     if not devices:
         return {}
     
+    # 子ノードを特定
     children = set()
     for conn in connections:
         if conn.get("type") == "uplink":
             children.add(conn["from"])
             
+    # 親を持たないノードがルート
     root_nodes = [d for d in devices.keys() if d not in children]
     if not root_nodes and devices:
-        root_nodes = [list(devices.keys())[0]]
+        root_nodes = [list(devices.keys())[0]] # 循環回避
         
     layers = {}
     queue = [(node, 1) for node in root_nodes]
@@ -74,7 +76,9 @@ def calculate_layers() -> Dict[str, int]:
         visited.add(node)
         layers[node] = layer
         
-        for child in children_map.get(node, []):
+        # 名前順で子を追加（同一親の子同士の並び順を安定させるため）
+        child_nodes = sorted(children_map.get(node, []))
+        for child in child_nodes:
             queue.append((child, layer + 1))
             
     for d in devices.keys():
@@ -82,6 +86,42 @@ def calculate_layers() -> Dict[str, int]:
             layers[d] = 1
             
     return layers
+
+def calculate_positions(layers: Dict[str, int]) -> Dict[str, Dict[str, int]]:
+    """
+    各ノードのX, Y座標を決定する。
+    - Y軸: レイヤー番号に基づき配置
+    - X軸: レイヤー内のノード数に基づいて中央揃え（センタリング）
+    """
+    positions = {}
+    
+    # レイヤーごとにノードをグループ化し、名前順でソート
+    layer_groups = {}
+    for node, layer in layers.items():
+        if layer not in layer_groups:
+            layer_groups[layer] = []
+        layer_groups[layer].append(node)
+    
+    for layer in layer_groups:
+        layer_groups[layer].sort()  # 名前順にソート（Switch01, Switch02...）
+
+    # 座標計算定数
+    Y_SPACING = 150
+    X_SPACING = 200
+
+    for layer, nodes in layer_groups.items():
+        count = len(nodes)
+        # 行全体の幅
+        total_width = (count - 1) * X_SPACING
+        # 左端の開始位置（0を中心とする）
+        start_x = -total_width / 2
+        
+        for i, node in enumerate(nodes):
+            x = start_x + (i * X_SPACING)
+            y = (layer - 1) * Y_SPACING
+            positions[node] = {"x": int(x), "y": int(y)}
+            
+    return positions
 
 def check_lineage(dev_a: str, dev_b: str) -> bool:
     """親子関係チェック"""
@@ -141,7 +181,7 @@ def check_cycle_for_uplink(parent: str, child: str) -> bool:
 
 # ==================== vis.js HTML ====================
 def generate_visjs_html() -> str:
-    """vis.jsのHTML生成"""
+    """vis.jsのHTML生成（座標固定モード）"""
     devices = st.session_state.devices
     connections = st.session_state.connections
     
@@ -150,18 +190,17 @@ def generate_visjs_html() -> str:
                    background:#f5f5f5;border-radius:8px;'>
                    📍 デバイスを追加してください</div>"""
     
+    # 座標計算を実行
     layers = calculate_layers()
-    
-    # 描画用のノードリスト生成（レイヤー順 -> 名前順でソートして安定化させる）
-    sorted_dev_ids = sorted(devices.keys(), key=lambda x: (layers.get(x, 1), x))
+    positions = calculate_positions(layers)
     
     nodes_data = []
-    for dev_id in sorted_dev_ids:
-        dev = devices[dev_id]
+    for dev_id, dev in devices.items():
         dev_type = dev.get("type", "SWITCH")
         style = DEVICE_TYPES.get(dev_type, DEVICE_TYPES["SWITCH"])
         vendor = dev.get("metadata", {}).get("vendor") or ""
-        layer = layers.get(dev_id, 1)
+        
+        pos = positions.get(dev_id, {"x": 0, "y": 0})
         
         label = f"{dev_id}"
         if vendor:
@@ -170,6 +209,8 @@ def generate_visjs_html() -> str:
         nodes_data.append({
             "id": dev_id,
             "label": label,
+            "x": pos["x"], # 計算したX座標を指定
+            "y": pos["y"], # 計算したY座標を指定
             "color": {
                 "background": style["color"], 
                 "border": "#222",
@@ -177,9 +218,9 @@ def generate_visjs_html() -> str:
             },
             "font": {"color": "white", "size": 14, "face": "arial", "vadjust": 0},
             "shape": "box",
-            "level": layer,
             "margin": 10,
-            "shadow": True
+            "shadow": True,
+            "physics": False # 個別ノードの物理演算もOFF
         })
     
     edges_data = []
@@ -193,9 +234,10 @@ def generate_visjs_html() -> str:
                 "arrows": "to",
                 "color": {"color": "#555"},
                 "width": 2,
+                "smooth": {"type": "cubicBezier", "roundness": 0.5} # 曲線にして重なりを軽減
             })
         else:
-            # Peer接続: レイアウト計算から完全に除外するための設定
+            # Peer接続
             edges_data.append({
                 "from": conn["from"],
                 "to": conn["to"],
@@ -203,14 +245,12 @@ def generate_visjs_html() -> str:
                 "dashes": [8, 8],
                 "arrows": "",
                 "width": 3,
-                "constraint": False, # 階層レイアウト制約を無視
-                "physics": False     # 物理演算の影響も受けない
+                "smooth": False # ピア接続は直線
             })
     
     nodes_json = json.dumps(nodes_data)
     edges_json = json.dumps(edges_data)
     
-    # 【改修箇所】vis.jsオプションを「幾何学的整列」優先に書き換え
     return f"""
     <!DOCTYPE html>
     <html>
@@ -228,35 +268,28 @@ def generate_visjs_html() -> str:
             var edges = new vis.DataSet({edges_json});
             var container = document.getElementById('network');
             var data = {{ nodes: nodes, edges: edges }};
+            
+            // レイアウトエンジンを無効化し、手動座標に従う設定
             var options = {{
                 layout: {{
                     hierarchical: {{
-                        enabled: true,
-                        direction: 'UD',        // 上から下へ
-                        sortMethod: 'directed', // 階層構造に厳密に従う
-                        levelSeparation: 150,   // 階層間の距離
-                        nodeSpacing: 250,       // ノード間の距離（広めにとる）
-                        treeSpacing: 300,       // ツリー間の距離
-                        
-                        // 【重要】以下3つで「いびつさ」を強制補正する
-                        blockShifting: false,    // ノードを密集させる処理をOFF（左右対称になる）
-                        edgeMinimization: false, // エッジ長短縮処理をOFF（歪みを防ぐ）
-                        parentCentralization: true // 親を子の重心に配置する
+                        enabled: false // 自動レイアウトを完全OFF
                     }}
                 }},
                 physics: {{ 
-                    enabled: false // 物理演算をOFFにして静的に配置（ふらつき防止）
+                    enabled: false // 物理演算も完全OFF（固定配置）
                 }},
                 interaction: {{
-                    dragNodes: true,
+                    dragNodes: true, // ユーザーによる微調整は許可
                     dragView: true,
                     zoomView: true,
                     hover: true
                 }},
                 nodes: {{ borderWidth: 2 }}
             }};
+            
             var network = new vis.Network(container, data, options);
-            network.fit();
+            network.fit(); // 全体が収まるようにズーム調整
         </script>
     </body>
     </html>
