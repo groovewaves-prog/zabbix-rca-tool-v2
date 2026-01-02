@@ -80,7 +80,6 @@ def calculate_layers() -> Dict[str, int]:
         for child in child_nodes:
             queue.append((child, layer + 1))
             
-    # 一旦全てのノードにレイヤーを割り当てる（孤立ノードは後で上書きされるが念のため）
     for d in devices.keys():
         if d not in layers:
             layers[d] = 1
@@ -598,10 +597,17 @@ def render_data_io():
     
     c1, c2 = st.columns(2)
     with c1:
+        # ファイル名入力欄を追加
+        filename_input = st.text_input("保存ファイル名", value="topology.json")
+        if not filename_input.endswith(".json"):
+            filename_input += ".json"
+
+        # 【重要】connectionsリストを明示的に保存する
         export_data = {
             "topology": {},
+            "connections": st.session_state.connections, # ここで接続リストを保存
             "redundancy_groups": {},
-            "metadata": {"version": "2.1"}
+            "metadata": {"version": "2.2"}
         }
         layers = calculate_layers()
         for d_id, d_data in st.session_state.devices.items():
@@ -617,9 +623,17 @@ def render_data_io():
             }
         
         json_str = json.dumps(export_data, ensure_ascii=False, indent=2)
-        st.download_button("📥 JSONダウンロード", json_str, "full_topology.json", "application/json", type="primary")
+        st.download_button(
+            label="📥 JSONダウンロード",
+            data=json_str,
+            file_name=filename_input,
+            mime="application/json",
+            type="primary"
+        )
 
     with c2:
+        st.write("") # スペース調整
+        st.write("")
         uploaded = st.file_uploader("📤 JSON読み込み", type=["json"])
         if uploaded:
             if st.button("適用", type="primary"):
@@ -629,16 +643,24 @@ def render_data_io():
                     new_devs = {}
                     new_conns = []
                     
+                    # 1. デバイス情報の復元
                     for d_id, d_val in topo.items():
                         new_devs[d_id] = {
                             "type": d_val.get("type", "SWITCH"),
                             "metadata": d_val.get("metadata", {})
                         }
-                        p_ids = d_val.get("parent_ids", [])
-                        if not p_ids and d_val.get("parent_id"):
-                            p_ids = [d_val.get("parent_id")]
-                        for p_id in p_ids:
-                            new_conns.append({"from": d_id, "to": p_id, "type": "uplink"})
+                    
+                    # 2. 接続情報の復元 (新形式 "connections" を優先)
+                    if "connections" in data:
+                        new_conns = data["connections"]
+                    else:
+                        # 旧形式 (parent_ids) からの復元ロジック (後方互換性)
+                        for d_id, d_val in topo.items():
+                            p_ids = d_val.get("parent_ids", [])
+                            if not p_ids and d_val.get("parent_id"):
+                                p_ids = [d_val.get("parent_id")]
+                            for p_id in p_ids:
+                                new_conns.append({"from": d_id, "to": p_id, "type": "uplink"})
                             
                     st.session_state.devices = new_devs
                     st.session_state.connections = new_conns
