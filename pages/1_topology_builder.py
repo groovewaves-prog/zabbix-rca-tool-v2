@@ -76,11 +76,11 @@ def calculate_layers() -> Dict[str, int]:
         visited.add(node)
         layers[node] = layer
         
-        # 名前順で子を追加（同一親の子同士の並び順を安定させるため）
         child_nodes = sorted(children_map.get(node, []))
         for child in child_nodes:
             queue.append((child, layer + 1))
             
+    # 一旦全てのノードにレイヤーを割り当てる（孤立ノードは後で上書きされるが念のため）
     for d in devices.keys():
         if d not in layers:
             layers[d] = 1
@@ -89,36 +89,55 @@ def calculate_layers() -> Dict[str, int]:
 
 def calculate_positions(layers: Dict[str, int]) -> Dict[str, Dict[str, int]]:
     """
-    各ノードのX, Y座標を決定する。
-    - Y軸: レイヤー番号に基づき配置
-    - X軸: レイヤー内のノード数に基づいて中央揃え（センタリング）
+    各ノードのX, Y座標を決定するアルゴリズム
+    ルール:
+    1. 孤立ノードは Layer 0 (最上段) に配置
+    2. 接続済みノードは Layer 1以降に配置
+    3. 各レイヤーのノード群は、X=0 を中心に左右対称に配置
     """
     positions = {}
-    
-    # レイヤーごとにノードをグループ化し、名前順でソート
-    layer_groups = {}
-    for node, layer in layers.items():
-        if layer not in layer_groups:
-            layer_groups[layer] = []
-        layer_groups[layer].append(node)
-    
-    for layer in layer_groups:
-        layer_groups[layer].sort()  # 名前順にソート（Switch01, Switch02...）
+    connections = st.session_state.connections
+    all_devices = st.session_state.devices.keys()
 
-    # 座標計算定数
+    # 1. 接続されているノードの集合を作る
+    connected_nodes = set()
+    for c in connections:
+        connected_nodes.add(c['from'])
+        connected_nodes.add(c['to'])
+
+    # 2. レイヤーごとにノードをグループ化
+    layer_groups = {} # { layer_num: [node1, node2], ... }
+
+    # A. 孤立ノード -> Layer 0
+    isolated_nodes = [d for d in all_devices if d not in connected_nodes]
+    if isolated_nodes:
+        layer_groups[0] = sorted(isolated_nodes)
+
+    # B. 接続済みノード -> 計算済みの Layer 1, 2, ...
+    for node in connected_nodes:
+        if node in all_devices: # 削除済みチェック
+            layer_num = layers.get(node, 1) # デフォルトは1
+            if layer_num not in layer_groups:
+                layer_groups[layer_num] = []
+            layer_groups[layer_num].append(node)
+
+    # 3. 座標計算
     Y_SPACING = 150
     X_SPACING = 200
 
-    for layer, nodes in layer_groups.items():
+    for layer_num, nodes in layer_groups.items():
+        # 名前順にソートして並びを安定させる
+        nodes.sort()
+        
         count = len(nodes)
-        # 行全体の幅
+        # その行の全幅を計算
         total_width = (count - 1) * X_SPACING
-        # 左端の開始位置（0を中心とする）
+        # 左端の開始位置（全体がX=0を中心にくるように調整）
         start_x = -total_width / 2
         
         for i, node in enumerate(nodes):
             x = start_x + (i * X_SPACING)
-            y = (layer - 1) * Y_SPACING
+            y = layer_num * Y_SPACING
             positions[node] = {"x": int(x), "y": int(y)}
             
     return positions
@@ -181,7 +200,7 @@ def check_cycle_for_uplink(parent: str, child: str) -> bool:
 
 # ==================== vis.js HTML ====================
 def generate_visjs_html() -> str:
-    """vis.jsのHTML生成（座標固定モード）"""
+    """vis.jsのHTML生成（座標固定・直線モード）"""
     devices = st.session_state.devices
     connections = st.session_state.connections
     
@@ -200,6 +219,7 @@ def generate_visjs_html() -> str:
         style = DEVICE_TYPES.get(dev_type, DEVICE_TYPES["SWITCH"])
         vendor = dev.get("metadata", {}).get("vendor") or ""
         
+        # 計算された座標を取得
         pos = positions.get(dev_id, {"x": 0, "y": 0})
         
         label = f"{dev_id}"
@@ -209,8 +229,8 @@ def generate_visjs_html() -> str:
         nodes_data.append({
             "id": dev_id,
             "label": label,
-            "x": pos["x"], # 計算したX座標を指定
-            "y": pos["y"], # 計算したY座標を指定
+            "x": pos["x"],
+            "y": pos["y"],
             "color": {
                 "background": style["color"], 
                 "border": "#222",
@@ -220,7 +240,7 @@ def generate_visjs_html() -> str:
             "shape": "box",
             "margin": 10,
             "shadow": True,
-            "physics": False # 個別ノードの物理演算もOFF
+            "physics": False # 固定配置
         })
     
     edges_data = []
@@ -234,7 +254,7 @@ def generate_visjs_html() -> str:
                 "arrows": "to",
                 "color": {"color": "#555"},
                 "width": 2,
-                "smooth": {"type": "cubicBezier", "roundness": 0.5} # 曲線にして重なりを軽減
+                "smooth": False # 直線にする
             })
         else:
             # Peer接続
@@ -245,7 +265,7 @@ def generate_visjs_html() -> str:
                 "dashes": [8, 8],
                 "arrows": "",
                 "width": 3,
-                "smooth": False # ピア接続は直線
+                "smooth": False # 直線にする
             })
     
     nodes_json = json.dumps(nodes_data)
@@ -269,27 +289,27 @@ def generate_visjs_html() -> str:
             var container = document.getElementById('network');
             var data = {{ nodes: nodes, edges: edges }};
             
-            // レイアウトエンジンを無効化し、手動座標に従う設定
             var options = {{
                 layout: {{
                     hierarchical: {{
-                        enabled: false // 自動レイアウトを完全OFF
+                        enabled: false // 自動レイアウトOFF
                     }}
                 }},
                 physics: {{ 
-                    enabled: false // 物理演算も完全OFF（固定配置）
+                    enabled: false // 物理演算OFF
                 }},
                 interaction: {{
-                    dragNodes: true, // ユーザーによる微調整は許可
+                    dragNodes: true,
                     dragView: true,
                     zoomView: true,
                     hover: true
                 }},
-                nodes: {{ borderWidth: 2 }}
+                nodes: {{ borderWidth: 2 }},
+                edges: {{ smooth: false }} // 全体設定でも直線を強制
             }};
             
             var network = new vis.Network(container, data, options);
-            network.fit(); // 全体が収まるようにズーム調整
+            network.fit();
         </script>
     </body>
     </html>
