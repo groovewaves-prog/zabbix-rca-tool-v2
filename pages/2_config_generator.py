@@ -23,8 +23,8 @@ st.set_page_config(
 # ==================== データディレクトリ ====================
 DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
 
-def load_topology():
-    """トポロジーデータを読み込む"""
+def load_local_topology():
+    """サーバーローカルのトポロジーデータを読み込む"""
     topology_path = os.path.join(DATA_DIR, "topology.json")
     if os.path.exists(topology_path):
         with open(topology_path, "r", encoding="utf-8") as f:
@@ -70,42 +70,31 @@ class MockZabbixAPI:
     """Zabbixサーバーがない環境でも動作確認するためのモッククラス"""
     def __init__(self):
         self.url = "http://mock-zabbix/api"
-        # 疑似的なID管理
         self.group_counter = 10
         self.host_counter = 100
         self.template_counter = 500
 
     def call(self, method: str, params: Any = None):
         """API呼び出しをシミュレートしてダミーデータを返す"""
-        time.sleep(0.1) # 通信している雰囲気を出すためのウェイト
+        time.sleep(0.1) 
 
         if method == "apiinfo.version":
             return "6.4.0 (Mock Mode)"
-        
         elif method == "hostgroup.get":
-            # 既存グループはないものとして返す（全て新規作成させる）
             return []
-        
         elif method == "hostgroup.create":
             self.group_counter += 1
             return {"groupids": [str(self.group_counter)]}
-        
         elif method == "template.get":
-            # 常にテンプレートが見つかったことにする
             self.template_counter += 1
             return [{"templateid": str(self.template_counter)}]
-        
         elif method == "host.get":
-            # 50%の確率で「既にホストが存在する」ことにして更新処理のテストもさせる
-            # ホスト名に基づいて決定論的に返す（リロードしても結果が変わらないように）
             host_name = params.get('filter', {}).get('host', '')
             if hash(host_name) % 2 == 0:
                 return [{"hostid": str(self.host_counter + hash(host_name) % 100)}]
             return []
-        
         elif method == "host.create":
             return {"hostids": [str(self.host_counter + 1)]}
-        
         elif method == "host.update":
             return {"hostids": [str(self.host_counter)]}
             
@@ -213,9 +202,7 @@ def push_config_to_zabbix(api: Any, config: Dict):
     """API経由でZabbixに反映 (st.status対応)"""
     logs = []
     
-    # 1. ホストグループ
     st.write("📂 ホストグループを確認中...")
-    # MockAPIとRealAPIでメソッドシグネチャは同じにする
     existing_groups = {g['name']: g['groupid'] for g in api.call("hostgroup.get", {"output": ["groupid", "name"]})}
     
     for group in config["host_groups"]:
@@ -227,7 +214,6 @@ def push_config_to_zabbix(api: Any, config: Dict):
         else:
             logs.append(f"ℹ️ グループ既存: {g_name}")
 
-    # 2. テンプレートID解決
     st.write("📄 テンプレート情報を取得中...")
     template_cache = {}
     def get_template_id(name):
@@ -239,7 +225,6 @@ def push_config_to_zabbix(api: Any, config: Dict):
             return tid
         return None
 
-    # 3. ホスト作成/更新
     st.write("🖥️ ホスト設定を反映中...")
     for host_conf in config["hosts"]:
         hostname = host_conf["host"]
@@ -260,7 +245,7 @@ def push_config_to_zabbix(api: Any, config: Dict):
         existing = api.call("host.get", {"filter": {"host": hostname}, "output": ["hostid"]})
         if existing:
             host_payload["hostid"] = existing[0]['hostid']
-            del host_payload["interfaces"] # 既存IF維持のため除外
+            del host_payload["interfaces"] 
             api.call("host.update", host_payload)
             logs.append(f"🔄 ホスト更新: {hostname}")
         else:
@@ -271,11 +256,19 @@ def push_config_to_zabbix(api: Any, config: Dict):
 
 # ==================== UIメイン処理 ====================
 def main():
-    # --- サイドバー (API設定) ---
+    # --- サイドバー ---
     with st.sidebar:
-        st.header("🔗 Zabbix Server 設定")
+        # 【機能追加】ファイルアップローダー
+        st.header("📂 トポロジーデータ読み込み")
+        uploaded_file = st.file_uploader(
+            "JSONファイルをアップロード", 
+            type=["json"],
+            help="手持ちのtopology.jsonを使用する場合はこちらからアップロードしてください"
+        )
         
-        # モックモードのスイッチ
+        st.divider()
+        
+        st.header("🔗 Zabbix Server 設定")
         use_mock = st.checkbox("🧪 モックモード (Zabbix不要)", value=False, help="Zabbix環境がない場合でも動作を確認できます")
         
         if "zabbix_connected" not in st.session_state:
@@ -283,7 +276,6 @@ def main():
             st.session_state.zabbix_version = ""
             st.session_state.is_mock = False
 
-        # 入力フォーム (モック時は無効化)
         zabbix_url = st.text_input("URL", "http://192.168.1.100/zabbix", disabled=use_mock)
         zabbix_token = st.text_input("API Token", type="password", disabled=use_mock)
         
@@ -327,11 +319,23 @@ def main():
     
     st.divider()
 
-    # 1. データ読み込み
-    data = load_topology()
+    # 1. データ読み込み (アップロード優先 -> ローカルファイル)
+    data = None
+    if uploaded_file is not None:
+        try:
+            data = json.load(uploaded_file)
+            st.info(f"📂 アップロードされたファイルを使用中: `{uploaded_file.name}`")
+        except Exception as e:
+            st.error(f"ファイル読み込みエラー: {e}")
+            return
+    else:
+        data = load_local_topology()
+        if data:
+            st.info("📂 サーバー内の最新トポロジーデータを使用中")
+
     if not data:
         st.warning("⚠️ トポロジーデータが見つかりません。")
-        st.info("まずは「トポロジービルダー」でネットワーク構成を作成してください。")
+        st.info("ファイルをアップロードするか、「トポロジービルダー」で構成を作成してください。")
         if st.button("🔧 トポロジービルダーを開く", type="primary"):
             st.switch_page("pages/1_topology_builder.py")
         return
@@ -387,32 +391,24 @@ def main():
         st.markdown("##### 🚀 Zabbixへ投入")
         st.caption("API経由でZabbixサーバーに設定を即時反映します。")
         
-        # 投入ボタンの有効化判定
         if not st.session_state.zabbix_connected:
             st.warning("👈 サイドバーでZabbix(またはモック)への接続テストを行ってください。")
             st.button("Zabbixへ投入 (未接続)", disabled=True, use_container_width=True)
         else:
             if st.button("設定を投入する", type="primary", use_container_width=True):
-                
-                # APIインスタンスの準備 (Mock or Real)
                 if st.session_state.is_mock:
                     api = MockZabbixAPI()
                 else:
-                    # 再度インスタンス化 (セッション切れ対策)
                     api = ZabbixAPI(zabbix_url, zabbix_token)
 
-                # st.statusを使ったモダンな進捗表示
                 with st.status("Zabbixへの設定反映を実行中...", expanded=True) as status:
                     try:
                         logs = push_config_to_zabbix(api, config)
                         status.update(label="✅ 設定投入が完了しました！", state="complete", expanded=False)
-                        
-                        # 完了後のログ表示
                         st.success(f"成功: {len(config['hosts'])} 台のホスト設定を更新しました。")
                         with st.expander("実行ログ詳細"):
                             for log in logs:
                                 st.write(log)
-                                
                     except Exception as e:
                         status.update(label="❌ エラーが発生しました", state="error")
                         st.error(f"詳細: {e}")
