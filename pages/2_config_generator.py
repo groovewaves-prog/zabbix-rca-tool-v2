@@ -117,6 +117,10 @@ def generate_zabbix_config(data: Dict) -> Dict:
         "summary": {}
     }
     
+    # トポロジーが空の場合は空設定を返す
+    if not topology:
+        return config
+
     # 1. ホストグループ
     groups = set(["Network/Generated"])
     for d in topology.values():
@@ -256,9 +260,8 @@ def push_config_to_zabbix(api: Any, config: Dict):
 
 # ==================== UIメイン処理 ====================
 def main():
-    # --- サイドバー ---
+    # --- サイドバー (API設定) ---
     with st.sidebar:
-        # 【機能追加】ファイルアップローダー
         st.header("📂 トポロジーデータ読み込み")
         uploaded_file = st.file_uploader(
             "JSONファイルをアップロード", 
@@ -330,44 +333,48 @@ def main():
             return
     else:
         data = load_local_topology()
-        if data:
+        if data and data.get("topology"): # 中身があるかチェック
             st.info("📂 サーバー内の最新トポロジーデータを使用中")
-
-    if not data:
-        st.warning("⚠️ トポロジーデータが見つかりません。")
-        st.info("ファイルをアップロードするか、「トポロジービルダー」で構成を作成してください。")
-        if st.button("🔧 トポロジービルダーを開く", type="primary"):
-            st.switch_page("pages/1_topology_builder.py")
-        return
+        else:
+            # データがない場合はここでリターンし、警告を表示
+            st.warning("⚠️ トポロジーデータが見つかりません。")
+            st.info("ファイルをアップロードするか、「トポロジービルダー」で構成を作成してください。")
+            if st.button("🔧 トポロジービルダーを開く", type="primary"):
+                st.switch_page("pages/1_topology_builder.py")
+            return
 
     # 2. 設定生成 (自動実行)
+    # ここで生成ロジックを必ず通す
     config = generate_zabbix_config(data)
     
     # 3. プレビュー表示
     st.subheader("1. 設定プレビュー")
     
-    col_kpi1, col_kpi2, col_kpi3 = st.columns(3)
-    col_kpi1.metric("対象ホスト数", f"{len(config['hosts'])} 台")
-    col_kpi2.metric("ホストグループ数", f"{len(config['host_groups'])} 個")
-    col_kpi3.metric("適用テンプレート", "標準セット")
+    if not config["hosts"]:
+        st.warning("生成されたホスト設定がありません。トポロジーにデバイスが含まれているか確認してください。")
+    else:
+        col_kpi1, col_kpi2, col_kpi3 = st.columns(3)
+        col_kpi1.metric("対象ホスト数", f"{len(config['hosts'])} 台")
+        col_kpi2.metric("ホストグループ数", f"{len(config['host_groups'])} 個")
+        col_kpi3.metric("適用テンプレート", "標準セット")
 
-    with st.expander("詳細データを確認する (Table / JSON)", expanded=False):
-        tab1, tab2 = st.tabs(["📋 ホスト一覧", "🔍 JSONソース"])
-        with tab1:
-            df_data = []
-            for h in config["hosts"]:
-                macros_str = ", ".join([f"{m['macro']}={m['value']}" for m in h["macros"]])
-                tags_str = ", ".join([f"{t['tag']}:{t['value']}" for t in h["tags"]])
-                df_data.append({
-                    "Host": h["host"],
-                    "Groups": len(h["groups"]),
-                    "Templates": [t["name"] for t in h["templates"]],
-                    "Macros": macros_str,
-                    "Tags": tags_str
-                })
-            st.dataframe(pd.DataFrame(df_data), use_container_width=True)
-        with tab2:
-            st.json(config)
+        with st.expander("詳細データを確認する (Table / JSON)", expanded=False):
+            tab1, tab2 = st.tabs(["📋 ホスト一覧", "🔍 JSONソース"])
+            with tab1:
+                df_data = []
+                for h in config["hosts"]:
+                    macros_str = ", ".join([f"{m['macro']}={m['value']}" for m in h["macros"]])
+                    tags_str = ", ".join([f"{t['tag']}:{t['value']}" for t in h["tags"]])
+                    df_data.append({
+                        "Host": h["host"],
+                        "Groups": len(h["groups"]),
+                        "Templates": [t["name"] for t in h["templates"]],
+                        "Macros": macros_str,
+                        "Tags": tags_str
+                    })
+                st.dataframe(pd.DataFrame(df_data), use_container_width=True)
+            with tab2:
+                st.json(config)
 
     st.divider()
 
@@ -384,18 +391,23 @@ def main():
             data=json.dumps(config, ensure_ascii=False, indent=2),
             file_name="zabbix_auto_config.json",
             mime="application/json",
-            use_container_width=True
+            use_container_width=True,
+            disabled=len(config["hosts"]) == 0
         )
 
     with act_col2:
         st.markdown("##### 🚀 Zabbixへ投入")
         st.caption("API経由でZabbixサーバーに設定を即時反映します。")
         
+        # 投入ボタンの有効化判定
         if not st.session_state.zabbix_connected:
             st.warning("👈 サイドバーでZabbix(またはモック)への接続テストを行ってください。")
             st.button("Zabbixへ投入 (未接続)", disabled=True, use_container_width=True)
+        elif len(config["hosts"]) == 0:
+            st.button("Zabbixへ投入 (データなし)", disabled=True, use_container_width=True)
         else:
             if st.button("設定を投入する", type="primary", use_container_width=True):
+                
                 if st.session_state.is_mock:
                     api = MockZabbixAPI()
                 else:
