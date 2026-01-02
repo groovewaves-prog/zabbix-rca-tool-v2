@@ -1,44 +1,24 @@
 """
-Zabbix RCA Tool - 監視設定生成
-トポロジーからZabbix設定を自動生成
+Zabbix RCA Tool - 監視設定生成 & API連携
+トポロジーからZabbix設定を自動生成し、API経由で適用する
 """
 
 import streamlit as st
 import json
 import os
-from datetime import datetime
-from typing import Dict
+import requests
 import pandas as pd
+import time
+import random
+from typing import Dict, List, Any
 
 # ==================== ページ設定 ====================
 st.set_page_config(
     page_title="監視設定生成 - Zabbix RCA Tool",
     page_icon="⚙️",
     layout="wide",
-    initial_sidebar_state="collapsed"
+    initial_sidebar_state="expanded"
 )
-
-# ==================== カスタムCSS ====================
-st.markdown("""
-<style>
-    #MainMenu {visibility: hidden;}
-    footer {visibility: hidden;}
-    
-    .config-card {
-        padding: 20px;
-        border-radius: 10px;
-        background: #f8f9fa;
-        margin: 10px 0;
-    }
-    .hint-box {
-        padding: 15px;
-        background: #e7f3ff;
-        border-left: 4px solid #2196f3;
-        border-radius: 0 8px 8px 0;
-        margin: 15px 0;
-    }
-</style>
-""", unsafe_allow_html=True)
 
 # ==================== データディレクトリ ====================
 DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
@@ -51,397 +31,391 @@ def load_topology():
             return json.load(f)
     return {}
 
-def load_full_topology():
-    """完全版トポロジーデータを読み込む"""
-    full_path = os.path.join(DATA_DIR, "full_topology.json")
-    if os.path.exists(full_path):
-        with open(full_path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return None
+# ==================== Zabbix API クライアント (実通信用) ====================
+class ZabbixAPI:
+    def __init__(self, url: str, token: str):
+        self.url = url.rstrip('/') + '/api_jsonrpc.php'
+        self.headers = {'Content-Type': 'application/json'}
+        self.auth = token
+        self.id_counter = 1
 
-# ==================== Zabbix設定生成 ====================
-def generate_zabbix_config(topology: Dict) -> Dict:
-    """トポロジーからZabbix設定を生成"""
+    def call(self, method: str, params: Any = None):
+        """汎用API呼び出し"""
+        payload = {
+            "jsonrpc": "2.0",
+            "method": method,
+            "params": params or {},
+            "auth": self.auth,
+            "id": self.id_counter
+        }
+        self.id_counter += 1
+        
+        try:
+            response = requests.post(self.url, headers=self.headers, json=payload, timeout=10)
+            response.raise_for_status()
+            result = response.json()
+            
+            if 'error' in result:
+                raise Exception(f"Zabbix API Error: {result['error']['data']}")
+            return result.get('result')
+        except Exception as e:
+            raise Exception(f"Connection Failed: {str(e)}")
+
+    def check_connection(self):
+        """接続確認"""
+        return self.call("apiinfo.version")
+
+# ==================== Mock Zabbix API (デモ用) ====================
+class MockZabbixAPI:
+    """Zabbixサーバーがない環境でも動作確認するためのモッククラス"""
+    def __init__(self):
+        self.url = "http://mock-zabbix/api"
+        # 疑似的なID管理
+        self.group_counter = 10
+        self.host_counter = 100
+        self.template_counter = 500
+
+    def call(self, method: str, params: Any = None):
+        """API呼び出しをシミュレートしてダミーデータを返す"""
+        time.sleep(0.1) # 通信している雰囲気を出すためのウェイト
+
+        if method == "apiinfo.version":
+            return "6.4.0 (Mock Mode)"
+        
+        elif method == "hostgroup.get":
+            # 既存グループはないものとして返す（全て新規作成させる）
+            return []
+        
+        elif method == "hostgroup.create":
+            self.group_counter += 1
+            return {"groupids": [str(self.group_counter)]}
+        
+        elif method == "template.get":
+            # 常にテンプレートが見つかったことにする
+            self.template_counter += 1
+            return [{"templateid": str(self.template_counter)}]
+        
+        elif method == "host.get":
+            # 50%の確率で「既にホストが存在する」ことにして更新処理のテストもさせる
+            # ホスト名に基づいて決定論的に返す（リロードしても結果が変わらないように）
+            host_name = params.get('filter', {}).get('host', '')
+            if hash(host_name) % 2 == 0:
+                return [{"hostid": str(self.host_counter + hash(host_name) % 100)}]
+            return []
+        
+        elif method == "host.create":
+            return {"hostids": [str(self.host_counter + 1)]}
+        
+        elif method == "host.update":
+            return {"hostids": [str(self.host_counter)]}
+            
+        return {}
+
+    def check_connection(self):
+        return self.call("apiinfo.version")
+
+# ==================== 設定生成ロジック ====================
+def generate_zabbix_config(data: Dict) -> Dict:
+    """トポロジーデータからZabbix設定JSONを生成"""
+    topology = data.get("topology", {})
+    connections = data.get("connections", [])
+    module_master = data.get("module_master_list", [])
+    
     config = {
         "host_groups": [],
         "hosts": [],
         "templates": [],
-        "triggers": [],
-        "dependencies": []
+        "summary": {}
     }
     
-    # 属性収集
-    layers = set()
-    vendors = set()
-    locations = set()
-    ha_groups = set()
-    
-    for host_id, host_data in topology.items():
-        layers.add(f"Layer{host_data.get('layer', 0)}")
-        if host_data.get("metadata", {}).get("vendor"):
-            vendors.add(host_data["metadata"]["vendor"])
-        if host_data.get("metadata", {}).get("location"):
-            locations.add(host_data["metadata"]["location"])
-        if host_data.get("redundancy_group"):
-            ha_groups.add(host_data["redundancy_group"])
-    
-    # ホストグループ生成
-    config["host_groups"] = [
-        *[{"name": f"Network/{layer}", "type": "layer"} for layer in sorted(layers)],
-        *[{"name": f"Vendor/{vendor}", "type": "vendor"} for vendor in vendors],
-        *[{"name": f"Location/{loc}", "type": "location"} for loc in locations],
-        *[{"name": f"HA_Groups/{group}", "type": "ha"} for group in ha_groups]
-    ]
-    
-    # テンプレートマッピング
+    # 1. ホストグループ
+    groups = set(["Network/Generated"])
+    for d in topology.values():
+        meta = d.get("metadata", {})
+        if meta.get("vendor"): groups.add(f"Vendor/{meta['vendor']}")
+        if meta.get("location"): groups.add(f"Location/{meta['location']}")
+        groups.add(f"Network/Layer{d.get('layer', 0)}")
+
+    config["host_groups"] = [{"name": g} for g in sorted(groups)]
+
+    # 2. テンプレートマッピング (仮定義)
     template_map = {
-        ("Cisco", "ROUTER"): ["Template Cisco IOS-XE SNMP", "Template ICMP Ping"],
-        ("Cisco", "SWITCH"): ["Template Cisco Catalyst SNMP", "Template ICMP Ping"],
-        ("Juniper", "FIREWALL"): ["Template Juniper SRX SNMP", "Template ICMP Ping"],
-        ("Juniper", "ROUTER"): ["Template Juniper JUNOS SNMP", "Template ICMP Ping"],
-        ("Fortinet", "FIREWALL"): ["Template Fortinet FortiGate SNMP", "Template ICMP Ping"],
-        ("Palo Alto", "FIREWALL"): ["Template Palo Alto SNMP", "Template ICMP Ping"],
-        ("Arista", "SWITCH"): ["Template Arista EOS SNMP", "Template ICMP Ping"],
-        ("default", "ROUTER"): ["Template Generic Router SNMP", "Template ICMP Ping"],
-        ("default", "SWITCH"): ["Template Generic Switch SNMP", "Template ICMP Ping"],
-        ("default", "FIREWALL"): ["Template Generic Firewall SNMP", "Template ICMP Ping"],
-        ("default", "ACCESS_POINT"): ["Template Generic SNMP AP", "Template ICMP Ping"],
-        ("default", "SERVER"): ["Template Linux by Zabbix Agent", "Template ICMP Ping"],
-        ("default", "LOAD_BALANCER"): ["Template Generic Load Balancer", "Template ICMP Ping"],
-        ("default", "STORAGE"): ["Template Generic Storage SNMP", "Template ICMP Ping"],
+        "Cisco": "Template Net Cisco IOS SNMP",
+        "Juniper": "Template Net Juniper SNMP",
+        "Linux": "Template OS Linux by Zabbix agent",
+        "Windows": "Template OS Windows by Zabbix agent",
+        "default": "Template Module ICMP Ping"
     }
-    
-    # ホスト設定生成
-    for host_id, host_data in topology.items():
-        vendor = host_data.get("metadata", {}).get("vendor", "default")
-        device_type = host_data.get("type", "unknown")
+
+    # 3. ホスト設定
+    for dev_id, dev_data in topology.items():
+        meta = dev_data.get("metadata", {})
+        hw = meta.get("hw_inventory", {})
         
-        templates = template_map.get((vendor, device_type), 
-                    template_map.get(("default", device_type), ["Template ICMP Ping"]))
+        # グループ
+        host_groups = [{"name": "Network/Generated"}, {"name": f"Network/Layer{dev_data.get('layer',0)}"}]
+        if meta.get("vendor"): host_groups.append({"name": f"Vendor/{meta['vendor']}"})
         
-        groups = [f"Network/Layer{host_data.get('layer', 0)}"]
-        if vendor and vendor != "default":
-            groups.append(f"Vendor/{vendor}")
-        if host_data.get("metadata", {}).get("location"):
-            groups.append(f"Location/{host_data['metadata']['location']}")
-        if host_data.get("redundancy_group"):
-            groups.append(f"HA_Groups/{host_data['redundancy_group']}")
+        # テンプレート
+        vendor = meta.get("vendor", "default")
+        template_name = template_map.get(vendor, template_map["default"])
         
-        host_config = {
-            "host_id": host_id,
-            "name": host_id,
-            "groups": groups,
-            "templates": templates,
-            "tags": [
-                {"tag": "layer", "value": str(host_data.get("layer", 0))},
-                {"tag": "type", "value": device_type},
-            ],
-            "macros": {}
+        # インターフェース
+        interfaces = [{
+            "type": 2, "main": 1, "useip": 1, "ip": "192.168.1.1", "dns": "", "port": "161",
+            "details": {"version": 2, "community": "public"}
+        }]
+
+        # マクロ (モジュール監視)
+        macros = []
+        if hw.get("psu_count"): macros.append({"macro": "{$EXPECTED_PSU_COUNT}", "value": str(hw["psu_count"])})
+        if hw.get("fan_count"): macros.append({"macro": "{$EXPECTED_FAN_COUNT}", "value": str(hw["fan_count"])})
+        
+        custom_mods = hw.get("custom_modules", {})
+        for mod_name in module_master:
+            count = custom_mods.get(mod_name, 0)
+            safe_name = mod_name.upper().replace("-", "_").replace(" ", "_").replace("+", "PLUS")
+            macros.append({"macro": f"{{$EXPECTED_{safe_name}_COUNT}}", "value": str(count)})
+
+        # タグ (LAG/VLAN)
+        tags = [
+            {"tag": "Layer", "value": str(dev_data.get("layer", 0))},
+            {"tag": "Type", "value": dev_data.get("type", "Unknown")},
+            {"tag": "Model", "value": meta.get("model", "Unknown")}
+        ]
+        
+        has_lag = False
+        vlan_ids = set()
+        for c in connections:
+            if c["from"] == dev_id or c["to"] == dev_id:
+                c_meta = c.get("metadata", {})
+                if c_meta.get("lag_enabled"): has_lag = True
+                if c_meta.get("vlans"):
+                    for v in c_meta["vlans"].replace(" ", "").split(","):
+                        if v: vlan_ids.add(v)
+        
+        if has_lag: tags.append({"tag": "Configuration", "value": "LAG"})
+        if vlan_ids: tags.append({"tag": "VLANs", "value": ",".join(sorted(vlan_ids))})
+
+        host_obj = {
+            "host": dev_id, "name": dev_id, "groups": host_groups,
+            "interfaces": interfaces, "templates": [{"name": template_name}],
+            "macros": macros, "tags": tags, "inventory_mode": 1,
+            "description": f"Generated by RCA Tool.\nLocation: {meta.get('location', 'N/A')}"
         }
-        
-        if vendor and vendor != "default":
-            host_config["tags"].append({"tag": "vendor", "value": vendor})
-        
-        # モデル情報のタグ追加
-        if host_data.get("metadata", {}).get("model"):
-            host_config["tags"].append({"tag": "model", "value": host_data["metadata"]["model"]})
-        
-        # PSU_COUNTマクロの設定
-        if host_data.get("metadata", {}).get("hw_inventory", {}).get("psu_count"):
-            host_config["macros"]["{$PSU_COUNT}"] = host_data["metadata"]["hw_inventory"]["psu_count"]
-        
-        config["hosts"].append(host_config)
-        
-        # 依存関係
-        if host_data.get("parent_id"):
-            config["dependencies"].append({
-                "host": host_id,
-                "depends_on": host_data["parent_id"],
-                "type": "parent"
-            })
-        
-        # マルチパス対応（parent_ids）
-        if host_data.get("parent_ids"):
-            for i, parent_id in enumerate(host_data["parent_ids"]):
-                if i == 0 and parent_id == host_data.get("parent_id"):
-                    continue  # 既に追加済み
-                config["dependencies"].append({
-                    "host": host_id,
-                    "depends_on": parent_id,
-                    "type": "secondary" if i > 0 else "primary"
-                })
-    
-    # トリガー生成
-    for host_id, host_data in topology.items():
-        device_type = host_data.get("type", "unknown")
-        layer = host_data.get("layer", 99)
-        
-        # 到達性トリガー
-        config["triggers"].append({
-            "host": host_id,
-            "name": f"{host_id} is unreachable",
-            "expression": f"nodata(/{host_id}/icmp.ping,5m)=1",
-            "severity": "high" if layer <= 2 else "average"
-        })
-        
-        # ネットワーク機器のCPUトリガー
-        if device_type in ["ROUTER", "SWITCH", "FIREWALL", "LOAD_BALANCER"]:
-            config["triggers"].append({
-                "host": host_id,
-                "name": f"{host_id} CPU usage is high",
-                "expression": f"last(/{host_id}/system.cpu.util)>80",
-                "severity": "warning"
-            })
-        
-        # サーバーのメモリトリガー
-        if device_type == "SERVER":
-            config["triggers"].append({
-                "host": host_id,
-                "name": f"{host_id} Memory usage is high",
-                "expression": f"last(/{host_id}/vm.memory.util)>90",
-                "severity": "warning"
-            })
-        
-        # ストレージのディスクトリガー
-        if device_type == "STORAGE":
-            config["triggers"].append({
-                "host": host_id,
-                "name": f"{host_id} Disk space is low",
-                "expression": f"last(/{host_id}/vfs.fs.pused)>85",
-                "severity": "warning"
-            })
-        
-        # HA監視
-        if host_data.get("redundancy_group"):
-            config["triggers"].append({
-                "host": host_id,
-                "name": f"HA Failover detected - {host_id}",
-                "expression": f"change(/{host_id}/ha.role,1h)<>0",
-                "severity": "warning"
-            })
-        
-        # PSU監視
-        psu_count = host_data.get("metadata", {}).get("hw_inventory", {}).get("psu_count", 0)
-        if psu_count >= 2:
-            config["triggers"].append({
-                "host": host_id,
-                "name": f"{host_id} PSU failure detected",
-                "expression": f"last(/{host_id}/sensor.psu.status)<>0",
-                "severity": "warning"
-            })
-    
-    # サマリー追加
-    config["summary"] = {
-        "host_count": len(config["hosts"]),
-        "group_count": len(config["host_groups"]),
-        "trigger_count": len(config["triggers"]),
-        "dependency_count": len(config["dependencies"])
-    }
-    
+        config["hosts"].append(host_obj)
+
+    config["summary"] = {"hosts": len(config["hosts"]), "groups": len(config["host_groups"])}
     return config
 
-# ==================== 設定表示 ====================
-def display_config_summary(config: Dict):
-    """設定を人が読みやすい形式で表示"""
+# ==================== API投入ロジック ====================
+def push_config_to_zabbix(api: Any, config: Dict):
+    """API経由でZabbixに反映 (st.status対応)"""
+    logs = []
     
-    tab1, tab2 = st.tabs(["📊 サマリー表示", "📄 JSON表示"])
+    # 1. ホストグループ
+    st.write("📂 ホストグループを確認中...")
+    # MockAPIとRealAPIでメソッドシグネチャは同じにする
+    existing_groups = {g['name']: g['groupid'] for g in api.call("hostgroup.get", {"output": ["groupid", "name"]})}
     
-    with tab1:
-        # ホストグループ
-        st.subheader("🏷️ ホストグループ")
-        if config.get("host_groups"):
-            groups_df = pd.DataFrame(config["host_groups"])
-            st.dataframe(groups_df, use_container_width=True, hide_index=True)
-        
-        # ホスト設定
-        st.subheader("🖥️ ホスト設定")
-        if config.get("hosts"):
-            hosts_data = []
-            for host in config["hosts"]:
-                hosts_data.append({
-                    "ホスト名": host.get("host_id", ""),
-                    "グループ": ", ".join(host.get("groups", [])),
-                    "テンプレート": ", ".join(host.get("templates", [])),
-                })
-            hosts_df = pd.DataFrame(hosts_data)
-            st.dataframe(hosts_df, use_container_width=True, hide_index=True)
-        
-        # トリガー
-        st.subheader("⚡ トリガー")
-        if config.get("triggers"):
-            triggers_data = []
-            for trigger in config["triggers"]:
-                triggers_data.append({
-                    "ホスト": trigger.get("host", ""),
-                    "トリガー名": trigger.get("name", ""),
-                    "重要度": trigger.get("severity", ""),
-                })
-            triggers_df = pd.DataFrame(triggers_data)
-            st.dataframe(triggers_df, use_container_width=True, hide_index=True)
-        
-        # 依存関係
-        st.subheader("🔗 依存関係")
-        if config.get("dependencies"):
-            deps_data = []
-            for dep in config["dependencies"]:
-                deps_data.append({
-                    "ホスト": dep.get("host", ""),
-                    "依存先": dep.get("depends_on", ""),
-                    "タイプ": dep.get("type", ""),
-                })
-            deps_df = pd.DataFrame(deps_data)
-            st.dataframe(deps_df, use_container_width=True, hide_index=True)
+    for group in config["host_groups"]:
+        g_name = group["name"]
+        if g_name not in existing_groups:
+            res = api.call("hostgroup.create", {"name": g_name})
+            existing_groups[g_name] = res['groupids'][0]
+            logs.append(f"✅ グループ作成: {g_name}")
         else:
-            st.info("依存関係は設定されていません")
-    
-    with tab2:
-        st.json(config)
+            logs.append(f"ℹ️ グループ既存: {g_name}")
 
-# ==================== メイン ====================
+    # 2. テンプレートID解決
+    st.write("📄 テンプレート情報を取得中...")
+    template_cache = {}
+    def get_template_id(name):
+        if name in template_cache: return template_cache[name]
+        res = api.call("template.get", {"filter": {"host": name}, "output": ["templateid"]})
+        if res:
+            tid = res[0]['templateid']
+            template_cache[name] = tid
+            return tid
+        return None
+
+    # 3. ホスト作成/更新
+    st.write("🖥️ ホスト設定を反映中...")
+    for host_conf in config["hosts"]:
+        hostname = host_conf["host"]
+        
+        group_ids = [{"groupid": existing_groups[g["name"]]} for g in host_conf["groups"] if g["name"] in existing_groups]
+        template_ids = []
+        for t in host_conf["templates"]:
+            tid = get_template_id(t["name"])
+            if tid: template_ids.append({"templateid": tid})
+            else: logs.append(f"⚠️ テンプレート不明: {t['name']} (スキップ)")
+
+        host_payload = {
+            "host": hostname, "name": host_conf["name"], "groups": group_ids,
+            "interfaces": host_conf["interfaces"], "templates": template_ids,
+            "macros": host_conf["macros"], "tags": host_conf["tags"], "inventory_mode": 1
+        }
+
+        existing = api.call("host.get", {"filter": {"host": hostname}, "output": ["hostid"]})
+        if existing:
+            host_payload["hostid"] = existing[0]['hostid']
+            del host_payload["interfaces"] # 既存IF維持のため除外
+            api.call("host.update", host_payload)
+            logs.append(f"🔄 ホスト更新: {hostname}")
+        else:
+            api.call("host.create", host_payload)
+            logs.append(f"✨ ホスト作成: {hostname}")
+
+    return logs
+
+# ==================== UIメイン処理 ====================
 def main():
-    # ヘッダー
+    # --- サイドバー (API設定) ---
+    with st.sidebar:
+        st.header("🔗 Zabbix Server 設定")
+        
+        # モックモードのスイッチ
+        use_mock = st.checkbox("🧪 モックモード (Zabbix不要)", value=False, help="Zabbix環境がない場合でも動作を確認できます")
+        
+        if "zabbix_connected" not in st.session_state:
+            st.session_state.zabbix_connected = False
+            st.session_state.zabbix_version = ""
+            st.session_state.is_mock = False
+
+        # 入力フォーム (モック時は無効化)
+        zabbix_url = st.text_input("URL", "http://192.168.1.100/zabbix", disabled=use_mock)
+        zabbix_token = st.text_input("API Token", type="password", disabled=use_mock)
+        
+        if st.button("接続テスト", use_container_width=True):
+            try:
+                if use_mock:
+                    api = MockZabbixAPI()
+                    version = api.check_connection()
+                    st.session_state.is_mock = True
+                else:
+                    if not zabbix_url or not zabbix_token:
+                        st.warning("URLとトークンを入力してください")
+                        raise Exception("Input required")
+                    api = ZabbixAPI(zabbix_url, zabbix_token)
+                    version = api.check_connection()
+                    st.session_state.is_mock = False
+                
+                st.session_state.zabbix_connected = True
+                st.session_state.zabbix_version = version
+                st.success(f"接続成功! (v{version})")
+                
+            except Exception as e:
+                st.session_state.zabbix_connected = False
+                if str(e) != "Input required":
+                    st.error(f"接続失敗: {e}")
+
+        if st.session_state.zabbix_connected:
+            mode_label = "Mock" if st.session_state.is_mock else "Real"
+            st.success(f"✅ 接続済み ({mode_label} v{st.session_state.zabbix_version})")
+        else:
+            st.info("未接続")
+
+    # --- メインコンテンツ ---
     col1, col2 = st.columns([3, 1])
     with col1:
-        st.title("⚙️ 監視設定生成")
-        st.caption("トポロジーからZabbix監視設定を自動生成")
+        st.title("⚙️ 監視設定生成 & 自動投入")
+        st.caption("トポロジービルダーで作成した構成情報を元に、Zabbixの設定を自動生成・投入します。")
     with col2:
-        if st.button("🏠 ホームに戻る"):
+        if st.button("🏠 ホームに戻る", use_container_width=True):
             st.switch_page("Home.py")
     
     st.divider()
-    
-    # トポロジー読み込み
-    topology = load_topology()
-    full_topology = load_full_topology()
-    
-    if not topology:
-        st.warning("⚠️ トポロジーデータがありません")
-        st.info("👉 トポロジービルダーでトポロジーを作成してください")
-        
+
+    # 1. データ読み込み
+    data = load_topology()
+    if not data:
+        st.warning("⚠️ トポロジーデータが見つかりません。")
+        st.info("まずは「トポロジービルダー」でネットワーク構成を作成してください。")
         if st.button("🔧 トポロジービルダーを開く", type="primary"):
             st.switch_page("pages/1_topology_builder.py")
         return
+
+    # 2. 設定生成 (自動実行)
+    config = generate_zabbix_config(data)
     
-    # トポロジー情報表示
-    st.subheader("🗺️ 読み込み済みトポロジー")
+    # 3. プレビュー表示
+    st.subheader("1. 設定プレビュー")
     
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.metric("デバイス数", f"{len(topology)}台")
-    with col2:
-        layers = set(v.get("layer", 0) for v in topology.values())
-        st.metric("レイヤー数", len(layers))
-    with col3:
-        if full_topology:
-            rg_count = len(full_topology.get("redundancy_groups", {}))
-            st.metric("冗長グループ", rg_count)
-        else:
-            st.metric("冗長グループ", "-")
-    
-    # レイヤー別デバイス一覧
-    with st.expander("📋 デバイス一覧"):
-        for layer in sorted(set(v.get("layer", 0) for v in topology.values())):
-            layer_devices = [(k, v) for k, v in topology.items() if v.get("layer") == layer]
-            st.markdown(f"**Layer {layer}** ({len(layer_devices)}台)")
-            for dev_id, dev in layer_devices:
-                vendor = dev.get("metadata", {}).get("vendor", "-")
-                st.markdown(f"  └─ {dev_id} ({dev['type']}) - {vendor}")
-    
+    col_kpi1, col_kpi2, col_kpi3 = st.columns(3)
+    col_kpi1.metric("対象ホスト数", f"{len(config['hosts'])} 台")
+    col_kpi2.metric("ホストグループ数", f"{len(config['host_groups'])} 個")
+    col_kpi3.metric("適用テンプレート", "標準セット")
+
+    with st.expander("詳細データを確認する (Table / JSON)", expanded=False):
+        tab1, tab2 = st.tabs(["📋 ホスト一覧", "🔍 JSONソース"])
+        with tab1:
+            df_data = []
+            for h in config["hosts"]:
+                macros_str = ", ".join([f"{m['macro']}={m['value']}" for m in h["macros"]])
+                tags_str = ", ".join([f"{t['tag']}:{t['value']}" for t in h["tags"]])
+                df_data.append({
+                    "Host": h["host"],
+                    "Groups": len(h["groups"]),
+                    "Templates": [t["name"] for t in h["templates"]],
+                    "Macros": macros_str,
+                    "Tags": tags_str
+                })
+            st.dataframe(pd.DataFrame(df_data), use_container_width=True)
+        with tab2:
+            st.json(config)
+
     st.divider()
+
+    # 4. アクションエリア
+    st.subheader("2. アクション実行")
     
-    # 設定生成
-    st.subheader("🔧 監視設定生成")
+    act_col1, act_col2 = st.columns(2)
     
-    st.markdown("""
-    <div class="hint-box">
-        💡 <strong>生成される設定:</strong>
-        <ul>
-            <li>ホストグループ（レイヤー別、ベンダー別、ロケーション別、HA グループ別）</li>
-            <li>ホスト設定（テンプレート、タグ、マクロ）</li>
-            <li>トリガー（到達性、リソース使用率、HA フェイルオーバー）</li>
-            <li>依存関係（トポロジーの親子関係に基づく）</li>
-        </ul>
-    </div>
-    """, unsafe_allow_html=True)
-    
-    if st.button("🔧 監視設定を生成", type="primary", use_container_width=True):
-        with st.spinner("設定を生成中..."):
-            config = generate_zabbix_config(topology)
-            st.session_state.generated_config = config
-            
-            # 保存
-            os.makedirs(DATA_DIR, exist_ok=True)
-            with open(os.path.join(DATA_DIR, "zabbix_config.json"), "w", encoding="utf-8") as f:
-                json.dump(config, f, ensure_ascii=False, indent=2)
-    
-    # 生成結果表示
-    if "generated_config" in st.session_state:
-        config = st.session_state.generated_config
-        summary = config.get("summary", {})
-        
-        st.success(
-            f"✅ Zabbix設定を生成しました：・ホスト: {summary.get('host_count', 0)}台"
-            f"・ホストグループ: {summary.get('group_count', 0)}個"
-            f"・トリガー: {summary.get('trigger_count', 0)}個"
-            f"・依存関係: {summary.get('dependency_count', 0)}件"
+    with act_col1:
+        st.markdown("##### 📥 ファイル保存")
+        st.caption("生成された設定をJSONファイルとしてダウンロードします。")
+        st.download_button(
+            label="設定JSONをダウンロード",
+            data=json.dumps(config, ensure_ascii=False, indent=2),
+            file_name="zabbix_auto_config.json",
+            mime="application/json",
+            use_container_width=True
         )
+
+    with act_col2:
+        st.markdown("##### 🚀 Zabbixへ投入")
+        st.caption("API経由でZabbixサーバーに設定を即時反映します。")
         
-        with st.expander("📋 生成された設定を表示", expanded=True):
-            display_config_summary(config)
-        
-        # ダウンロード
-        col1, col2 = st.columns(2)
-        with col1:
-            st.download_button(
-                "📥 設定JSONをダウンロード",
-                json.dumps(config, ensure_ascii=False, indent=2),
-                "zabbix_config.json",
-                "application/json",
-                use_container_width=True
-            )
-        with col2:
-            if st.button("🎯 根本原因分析へ進む", use_container_width=True):
-                st.switch_page("pages/3_rca_analyzer.py")
-    
-    # Zabbixへのインポート手順
-    st.divider()
-    with st.expander("📖 Zabbixへのインポート手順"):
-        st.markdown("""
-        ### 方法1: Zabbix API経由
-        
-        ```python
-        import requests
-        import json
-        
-        # Zabbix API設定
-        ZABBIX_URL = "http://your-zabbix-server/api_jsonrpc.php"
-        AUTH_TOKEN = "your-auth-token"
-        
-        # 設定ファイルを読み込み
-        with open("zabbix_config.json") as f:
-            config = json.load(f)
-        
-        # ホストグループ作成
-        for group in config["host_groups"]:
-            # API呼び出し...
-        
-        # ホスト作成
-        for host in config["hosts"]:
-            # API呼び出し...
-        ```
-        
-        ### 方法2: Zabbix Web UI経由
-        
-        1. **Configuration** → **Host groups** でグループを作成
-        2. **Configuration** → **Hosts** でホストを作成
-        3. 各ホストにテンプレートを割り当て
-        4. **Configuration** → **Actions** で依存関係を設定
-        
-        ### 方法3: zabbix_export形式への変換
-        
-        生成された設定をZabbixのエクスポート形式（XML/YAML）に変換し、
-        Web UIからインポートすることも可能です。
-        """)
+        # 投入ボタンの有効化判定
+        if not st.session_state.zabbix_connected:
+            st.warning("👈 サイドバーでZabbix(またはモック)への接続テストを行ってください。")
+            st.button("Zabbixへ投入 (未接続)", disabled=True, use_container_width=True)
+        else:
+            if st.button("設定を投入する", type="primary", use_container_width=True):
+                
+                # APIインスタンスの準備 (Mock or Real)
+                if st.session_state.is_mock:
+                    api = MockZabbixAPI()
+                else:
+                    # 再度インスタンス化 (セッション切れ対策)
+                    api = ZabbixAPI(zabbix_url, zabbix_token)
+
+                # st.statusを使ったモダンな進捗表示
+                with st.status("Zabbixへの設定反映を実行中...", expanded=True) as status:
+                    try:
+                        logs = push_config_to_zabbix(api, config)
+                        status.update(label="✅ 設定投入が完了しました！", state="complete", expanded=False)
+                        
+                        # 完了後のログ表示
+                        st.success(f"成功: {len(config['hosts'])} 台のホスト設定を更新しました。")
+                        with st.expander("実行ログ詳細"):
+                            for log in logs:
+                                st.write(log)
+                                
+                    except Exception as e:
+                        status.update(label="❌ エラーが発生しました", state="error")
+                        st.error(f"詳細: {e}")
 
 if __name__ == "__main__":
     main()
