@@ -39,104 +39,85 @@ def init_session():
 
 # ==================== ロジック・計算 ====================
 def calculate_layers() -> Dict[str, int]:
-    """接続関係からレイヤー（Y軸）を自動計算"""
+    """
+    接続関係からレイヤー（Y軸）を自動計算する。
+    【修正版】最長パス法を用いて、親が複数いる場合は「最も深い親」に合わせて子を配置する。
+    これにより、一部のリンクが切れても全体の形状が崩れにくくなる。
+    """
     devices = st.session_state.devices
     connections = st.session_state.connections
     
     if not devices:
         return {}
     
-    # 子ノードを特定
-    children = set()
-    for conn in connections:
-        if conn.get("type") == "uplink":
-            children.add(conn["from"])
-            
-    # 親を持たないノードがルート
-    root_nodes = [d for d in devices.keys() if d not in children]
-    if not root_nodes and devices:
-        root_nodes = [list(devices.keys())[0]] # 循環回避
-        
-    layers = {}
-    queue = [(node, 1) for node in root_nodes]
-    visited = set()
+    # 1. 全ノードを初期レイヤー1に設定
+    layers = {d: 1 for d in devices}
     
-    children_map = {}
-    for conn in connections:
-        if conn.get("type") == "uplink":
-            parent, child = conn["to"], conn["from"]
-            if parent not in children_map:
-                children_map[parent] = []
-            children_map[parent].append(child)
+    # 2. 接続されているかどうかの判定用
+    connected_nodes = set()
+    for c in connections:
+        connected_nodes.add(c['from'])
+        connected_nodes.add(c['to'])
+
+    # 3. 反復計算でレイヤーを確定させる (ベルマン・フォード的な緩和処理)
+    # ループ回数はノード数分あれば十分収束する
+    for _ in range(len(devices)):
+        changed = False
+        for c in connections:
+            if c['type'] == 'uplink':
+                # データ構造: from=Child, to=Parent
+                # 視覚的構造: Parent(上) -> Child(下)
+                # ルール: Childのレイヤーは、Parentのレイヤー + 1 以上でなければならない
+                parent = c['to']
+                child = c['from']
+                
+                if parent in layers and child in layers:
+                    if layers[child] < layers[parent] + 1:
+                        layers[child] = layers[parent] + 1
+                        changed = True
+        if not changed:
+            break
             
-    while queue:
-        node, layer = queue.pop(0)
-        if node in visited:
-            continue
-        visited.add(node)
-        layers[node] = layer
-        
-        child_nodes = sorted(children_map.get(node, []))
-        for child in child_nodes:
-            queue.append((child, layer + 1))
-            
-    for d in devices.keys():
-        if d not in layers:
-            layers[d] = 1
+    # 4. 孤立ノード（リンクが1本もない）は強制的に Layer 0（最上段）へ
+    for d in devices:
+        if d not in connected_nodes:
+            layers[d] = 0
             
     return layers
 
 def calculate_positions(layers: Dict[str, int]) -> Dict[str, Dict[str, int]]:
     """
     各ノードのX, Y座標を決定するアルゴリズム
-    ルール:
-    1. 孤立ノードは Layer 0 (最上段) に配置
-    2. 接続済みノードは Layer 1以降に配置
-    3. 各レイヤーのノード群は、X=0 を中心に左右対称に配置
+    - Y軸: レイヤー番号 x 高さ
+    - X軸: 各レイヤーのノード群を中央揃え
     """
     positions = {}
-    connections = st.session_state.connections
-    all_devices = st.session_state.devices.keys()
+    
+    # レイヤーごとにノードをグループ化
+    layer_groups = {}
+    for node, layer in layers.items():
+        if layer not in layer_groups:
+            layer_groups[layer] = []
+        layer_groups[layer].append(node)
+    
+    # 名前順にソートして並びを安定させる
+    for layer in layer_groups:
+        layer_groups[layer].sort()
 
-    # 1. 接続されているノードの集合を作る
-    connected_nodes = set()
-    for c in connections:
-        connected_nodes.add(c['from'])
-        connected_nodes.add(c['to'])
-
-    # 2. レイヤーごとにノードをグループ化
-    layer_groups = {} # { layer_num: [node1, node2], ... }
-
-    # A. 孤立ノード -> Layer 0
-    isolated_nodes = [d for d in all_devices if d not in connected_nodes]
-    if isolated_nodes:
-        layer_groups[0] = sorted(isolated_nodes)
-
-    # B. 接続済みノード -> 計算済みの Layer 1, 2, ...
-    for node in connected_nodes:
-        if node in all_devices: # 削除済みチェック
-            layer_num = layers.get(node, 1) # デフォルトは1
-            if layer_num not in layer_groups:
-                layer_groups[layer_num] = []
-            layer_groups[layer_num].append(node)
-
-    # 3. 座標計算
+    # 座標計算定数
     Y_SPACING = 150
     X_SPACING = 200
 
-    for layer_num, nodes in layer_groups.items():
-        # 名前順にソートして並びを安定させる
-        nodes.sort()
-        
+    for layer, nodes in layer_groups.items():
         count = len(nodes)
-        # その行の全幅を計算
+        # 行全体の幅
         total_width = (count - 1) * X_SPACING
-        # 左端の開始位置（全体がX=0を中心にくるように調整）
+        # 左端の開始位置（0を中心とする）
         start_x = -total_width / 2
         
         for i, node in enumerate(nodes):
             x = start_x + (i * X_SPACING)
-            y = layer_num * Y_SPACING
+            y = layer * Y_SPACING
             positions[node] = {"x": int(x), "y": int(y)}
             
     return positions
@@ -253,7 +234,7 @@ def generate_visjs_html() -> str:
                 "arrows": "to",
                 "color": {"color": "#555"},
                 "width": 2,
-                "smooth": False # 直線にする
+                "smooth": False # 直線
             })
         else:
             # Peer接続
@@ -264,7 +245,7 @@ def generate_visjs_html() -> str:
                 "dashes": [8, 8],
                 "arrows": "",
                 "width": 3,
-                "smooth": False # 直線にする
+                "smooth": False # 直線
             })
     
     nodes_json = json.dumps(nodes_data)
@@ -388,7 +369,7 @@ def connection_dialog(source_id: str, mode: str):
             st.session_state.selected_devices = set()
             st.rerun()
 
-# 【追加】全データクリア確認ダイアログ
+# 全データクリア確認ダイアログ
 @st.dialog("全データ削除")
 def clear_data_dialog():
     st.warning("⚠️ **本当にすべてのデータを削除しますか？**\n\n作成したデバイスや接続設定はすべて失われます。この操作は元に戻せません。")
@@ -675,7 +656,6 @@ def render_data_io():
                 except Exception as e:
                     st.error(f"エラー: {e}")
     
-    # 【機能追加】全クリアボタン
     st.markdown("---")
     if st.button("🗑️ 全データをクリア (初期化)", type="primary", use_container_width=True):
         clear_data_dialog()
@@ -725,7 +705,9 @@ def main():
                     col_c1, col_c2 = st.columns([6,1])
                     with col_c1:
                         if c["type"] == "uplink":
-                            st.markdown(f"**⬇️ 下位接続:** {c['to']} ← {c['from']}")
+                            # 【修正箇所】表示を 親 → 子 に修正
+                            # to=Parent, from=Child なので to -> from となる
+                            st.markdown(f"**⬇️ 下位接続:** {c['to']} → {c['from']}")
                         else:
                             st.markdown(f"**↔️ ピア接続:** {c['from']} ↔ {c['to']}")
                     with col_c2:
