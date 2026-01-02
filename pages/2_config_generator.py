@@ -64,7 +64,7 @@ DEFAULT_TRIGGER_RULES = [
         "condition_type": "field_gt",
         "field": "hw.psu_count",
         "value": 1,
-        "threshold_macro": None, # 閾値なし（ステータス監視）
+        "threshold_macro": None,
         "default_value": None,
         "unit": ""
     },
@@ -255,7 +255,6 @@ def generate_zabbix_config(data: Dict, trigger_rules: List[Dict]) -> Dict:
             macros.append({"macro": f"{{$EXPECTED_{safe_name}_COUNT}}", "value": str(count)})
 
         # B. 閾値マクロ (トリガールールから)
-        # ここで設定することで、テンプレートのデフォルト値を上書きする
         for rule in trigger_rules:
             if rule.get("threshold_macro") and rule.get("default_value") is not None:
                 macros.append({
@@ -282,7 +281,7 @@ def generate_zabbix_config(data: Dict, trigger_rules: List[Dict]) -> Dict:
         if has_lag: tags.append({"tag": "Configuration", "value": "LAG"})
         if vlan_ids: tags.append({"tag": "VLANs", "value": ",".join(sorted(vlan_ids))})
 
-        # --- トリガープレビュー (閾値情報を含める) ---
+        # --- トリガープレビュー ---
         host_triggers = []
         for rule in trigger_rules:
             should_apply = False
@@ -465,11 +464,9 @@ def main():
     # ルールロード & 編集機能
     trigger_rules = load_trigger_rules()
     
-    # 【機能追加】閾値編集エリア
+    # 閾値編集エリア
     with st.expander("🛠️ 監視閾値の設定", expanded=False):
         st.caption("ここで設定した値はZabbixのマクロとして各ホストに適用され、テンプレートのデフォルト値を上書きします。")
-        
-        # 閾値を持つルールのみ抽出して表示
         threshold_rules = [r for r in trigger_rules if r.get("threshold_macro")]
         
         cols = st.columns(3)
@@ -487,9 +484,7 @@ def main():
                 key=f"thresh_{rule['id']}"
             )
             
-            # 変更検知
             if new_val != current_val:
-                # 元のリスト内の該当ルールを更新
                 for r in updated_rules:
                     if r["id"] == rule["id"]:
                         r["default_value"] = new_val
@@ -519,10 +514,10 @@ def main():
     with tab_host:
         df_hosts = []
         for h in config["hosts"]:
-            # マクロを見やすく整形 (閾値マクロを強調)
             macros_display = []
             for m in h["macros"]:
-                val = f"**{m['value']}**" if "LIMIT" in m['macro'] else m['value']
+                # 閾値マクロなどは強調せず通常テキストで表示
+                val = m['value']
                 macros_display.append(f"{m['macro']}={val}")
                 
             df_hosts.append({
@@ -530,7 +525,7 @@ def main():
                 "テンプレート": h["templates"][0]["name"],
                 "適用マクロ (閾値など)": ", ".join(macros_display)
             })
-        st.markdown(pd.DataFrame(df_hosts).to_markdown(index=False), unsafe_allow_html=True) # Markdownで太字反映
+        st.dataframe(pd.DataFrame(df_hosts), use_container_width=True)
 
     with tab_group:
         st.dataframe(pd.DataFrame(config["host_groups"]), use_container_width=True)
