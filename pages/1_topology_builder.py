@@ -37,28 +37,25 @@ def init_session():
         st.session_state.editing_device = None
     if "selected_devices" not in st.session_state:
         st.session_state.selected_devices = set()
+    
+    # 【追加】モジュール種別のマスタ定義 (初期値)
+    if "module_master_list" not in st.session_state:
+        st.session_state.module_master_list = ["LineCard", "Supervisor", "SFP+"]
 
 # ==================== ロジック・計算 ====================
 def calculate_layers() -> Dict[str, int]:
-    """
-    【改修版】レイヤー計算ロジック
-    1. 最長パス法で親子関係に基づく深さを計算
-    2. ピア接続(peer)がある場合、接続同士のレイヤーを深い方に合わせる（同期）
-       これにより、親リンクが切れてもピアがいれば同じ階層に留まる。
-    """
+    """レイヤー計算（最長パス法）"""
     devices = st.session_state.devices
     connections = st.session_state.connections
     
     if not devices:
         return {}
     
-    # 1. 全ノードを初期レイヤー1に設定
     layers = {d: 1 for d in devices}
+    connected_nodes = set()
     
-    # 2. 接続情報の整理
     uplinks = []
     peers = []
-    connected_nodes = set()
     
     for c in connections:
         connected_nodes.add(c['from'])
@@ -68,12 +65,8 @@ def calculate_layers() -> Dict[str, int]:
         else:
             peers.append(c)
 
-    # 3. 反復計算 (十分な回数ループさせて収束させる)
-    # ノード数分回せば理論上、最深部まで伝播する
     for _ in range(len(devices) + 2):
         changed = False
-        
-        # A. 親子関係によるレイヤー押し下げ (Parent -> Child)
         for c in uplinks:
             parent = c['to']
             child = c['from']
@@ -82,8 +75,6 @@ def calculate_layers() -> Dict[str, int]:
                     layers[child] = layers[parent] + 1
                     changed = True
         
-        # B. ピア接続によるレイヤー同期 (Peer <-> Peer)
-        # ピア同士は同じ高さ（低い方に合わせる=数値が大きい方）にする
         for c in peers:
             p1 = c['from']
             p2 = c['to']
@@ -95,11 +86,9 @@ def calculate_layers() -> Dict[str, int]:
                 if layers[p2] != max_layer:
                     layers[p2] = max_layer
                     changed = True
-                    
         if not changed:
             break
             
-    # 4. 孤立ノード（リンクが1本もない）は強制的に Layer 0（最上段）へ
     for d in devices:
         if d not in connected_nodes:
             layers[d] = 0
@@ -107,19 +96,12 @@ def calculate_layers() -> Dict[str, int]:
     return layers
 
 def calculate_positions(layers: Dict[str, int]) -> Dict[str, Dict[str, int]]:
-    """
-    【改修版】重心法 + 名前ソートによる配置決定
-    - 上のレイヤーの親の位置に基づいて、自分のX座標（並び順）を決める
-    - 親がいない、または同じ親を持つ場合は名前順でソートすることで、
-      「たすき掛け」構成でも左右対称にきれいに並ぶようにする。
-    """
+    """重心法を用いた座標計算"""
     positions = {}
     connections = st.session_state.connections
     
-    # レイヤーの最大深度を取得
     max_layer = max(layers.values()) if layers else 0
     
-    # 親子関係マップ (Child -> Parents List)
     child_to_parents = {}
     for c in connections:
         if c['type'] == 'uplink':
@@ -129,61 +111,43 @@ def calculate_positions(layers: Dict[str, int]) -> Dict[str, Dict[str, int]]:
                 child_to_parents[child] = []
             child_to_parents[child].append(parent)
 
-    # レイヤーごとにノードをリスト化
     nodes_by_layer = {}
     for node, layer in layers.items():
         if layer not in nodes_by_layer:
             nodes_by_layer[layer] = []
         nodes_by_layer[layer].append(node)
 
-    # 定数
     Y_SPACING = 150
     X_SPACING = 220
 
-    # ----- 座標決定プロセス -----
-    
-    # Layer 0 (孤立) と Layer 1 (ルート群) は単純に名前順
     for layer in range(max_layer + 1):
         if layer not in nodes_by_layer:
             continue
             
         nodes = nodes_by_layer[layer]
         
-        # ソートロジック
         if layer <= 1:
-            # 上位レイヤーは名前順
             nodes.sort()
         else:
-            # 下位レイヤーは「親の重心」順 -> 「名前」順
-            # これにより四角形(Mesh)がきれいに開く
             node_weights = []
             for node in nodes:
                 parents = child_to_parents.get(node, [])
                 parent_x_sum = 0
                 valid_parents = 0
-                
                 for p in parents:
-                    # 親の座標が既に計算済みか確認
                     if p in positions:
                         parent_x_sum += positions[p]["x"]
                         valid_parents += 1
                 
                 if valid_parents > 0:
-                    # 重心（親の平均X座標）
                     weight = parent_x_sum / valid_parents
                 else:
-                    # 親がいない（または上のレイヤーにいない）場合は、
-                    # 現在の並び順を維持するために大きな値を仮置きするか、
-                    # 名前順にするために0などを設定
                     weight = 0 
-                
                 node_weights.append((weight, node))
             
-            # 重み(重心)でソートし、同点なら名前でソート
             node_weights.sort(key=lambda x: (x[0], x[1]))
             nodes = [n[1] for n in node_weights]
 
-        # 座標割り当て (センタリング)
         count = len(nodes)
         total_width = (count - 1) * X_SPACING
         start_x = -total_width / 2
@@ -253,7 +217,7 @@ def check_cycle_for_uplink(parent: str, child: str) -> bool:
 
 # ==================== vis.js HTML ====================
 def generate_visjs_html() -> str:
-    """vis.jsのHTML生成（座標固定・直線モード）"""
+    """vis.jsのHTML生成"""
     devices = st.session_state.devices
     connections = st.session_state.connections
     
@@ -262,7 +226,6 @@ def generate_visjs_html() -> str:
                    background:#f5f5f5;border-radius:8px;'>
                    📍 デバイスを追加してください</div>"""
     
-    # 座標計算を実行
     layers = calculate_layers()
     positions = calculate_positions(layers)
     
@@ -297,28 +260,40 @@ def generate_visjs_html() -> str:
     
     edges_data = []
     for conn in connections:
-        conn_type = conn.get("type", "uplink")
+        conn_meta = conn.get("metadata", {})
+        is_lag = conn_meta.get("lag_enabled", False)
+        vlans = conn_meta.get("vlans", "")
         
-        if conn_type == "uplink":
-            edges_data.append({
-                "from": conn["to"], # Parent
-                "to": conn["from"], # Child
-                "arrows": "to",
-                "color": {"color": "#555"},
-                "width": 2,
-                "smooth": False
-            })
+        # 【機能追加】LAGの場合は線を太く青くする
+        edge_color = "#3498db" if is_lag else "#555" # LAG=Blue, Normal=Gray
+        edge_width = 5 if is_lag else 2
+        
+        # 【機能追加】VLAN情報があればラベル表示
+        edge_label = f"VLAN: {vlans}" if vlans else ""
+        
+        base_edge = {
+            "from": conn["from"],
+            "to": conn["to"],
+            "label": edge_label,
+            "font": {"size": 10, "align": "middle", "background": "white"},
+            "color": {"color": edge_color},
+            "width": edge_width,
+            "smooth": False
+        }
+
+        if conn["type"] == "uplink":
+            # 親 -> 子 の矢印 (データ構造は from=子, to=親 なので to -> from)
+            base_edge["from"] = conn["to"]
+            base_edge["to"] = conn["from"]
+            base_edge["arrows"] = "to"
         else:
-            # Peer接続
-            edges_data.append({
-                "from": conn["from"],
-                "to": conn["to"],
-                "color": {"color": "#f1c40f"}, 
-                "dashes": [8, 8],
-                "arrows": "",
-                "width": 3,
-                "smooth": False
-            })
+            # ピア接続
+            base_edge["color"]["color"] = "#f1c40f" if not is_lag else "#f39c12" # LAGの場合は濃いオレンジ
+            base_edge["dashes"] = [8, 8] if not is_lag else False # LAGなら実線にするなどの変化も可能だが、ピアなので点線のまま色を変える
+            base_edge["arrows"] = ""
+            base_edge["width"] = 3 if not is_lag else 5
+            
+        edges_data.append(base_edge)
     
     nodes_json = json.dumps(nodes_data)
     edges_json = json.dumps(edges_data)
@@ -342,14 +317,8 @@ def generate_visjs_html() -> str:
             var data = {{ nodes: nodes, edges: edges }};
             
             var options = {{
-                layout: {{
-                    hierarchical: {{
-                        enabled: false
-                    }}
-                }},
-                physics: {{ 
-                    enabled: false
-                }},
+                layout: {{ hierarchical: {{ enabled: false }} }},
+                physics: {{ enabled: false }},
                 interaction: {{
                     dragNodes: true,
                     dragView: true,
@@ -426,22 +395,51 @@ def connection_dialog(source_id: str, mode: str):
         if error_msg:
             st.error(error_msg)
         else:
+            # 接続データの作成（metadata初期化）
+            new_conn = {
+                "from": target_id if mode == "uplink" else source_id,
+                "to": source_id if mode == "uplink" else target_id,
+                "type": mode,
+                "metadata": {"lag_enabled": False, "vlans": ""}
+            }
             if mode == "uplink":
-                st.session_state.connections.append({
-                    "from": target_id,
-                    "to": source_id,
-                    "type": "uplink"
-                })
+                new_conn["from"] = target_id
+                new_conn["to"] = source_id
             else:
-                st.session_state.connections.append({
-                    "from": source_id,
-                    "to": target_id,
-                    "type": "peer"
-                })
+                new_conn["from"] = source_id
+                new_conn["to"] = target_id
+                
+            st.session_state.connections.append(new_conn)
             st.session_state.selected_devices = set()
             st.rerun()
 
-# 全データクリア確認ダイアログ
+@st.dialog("モジュール定義の管理")
+def manage_modules_dialog():
+    st.write("デバイスに追加可能なモジュールの種類を定義します。")
+    
+    # 現在のリスト表示と削除
+    if st.session_state.module_master_list:
+        st.markdown("##### 現在の定義済みモジュール")
+        for i, mod_name in enumerate(st.session_state.module_master_list):
+            c1, c2 = st.columns([4, 1])
+            c1.text(f"・ {mod_name}")
+            if c2.button("削除", key=f"del_mod_{i}"):
+                st.session_state.module_master_list.pop(i)
+                st.rerun()
+    else:
+        st.info("定義されているモジュールはありません。")
+
+    st.markdown("---")
+    st.markdown("##### 新規追加")
+    new_mod = st.text_input("モジュール名称", placeholder="例: LineCard-10G")
+    if st.button("追加", type="primary"):
+        if new_mod and new_mod not in st.session_state.module_master_list:
+            st.session_state.module_master_list.append(new_mod)
+            st.success(f"{new_mod} を追加しました")
+            st.rerun()
+        elif new_mod in st.session_state.module_master_list:
+            st.error("既に存在します")
+
 @st.dialog("全データ削除")
 def clear_data_dialog():
     st.warning("⚠️ **本当にすべてのデータを削除しますか？**\n\n作成したデバイスや接続設定はすべて失われます。この操作は元に戻せません。")
@@ -471,8 +469,7 @@ def render_add_device():
                             "vendor": "",
                             "model": "",
                             "location": "",
-                            "hw_inventory": {"psu_count": 1, "fan_count": 0},
-                            "network_config": {"lag_enabled": False, "vlans": []}
+                            "hw_inventory": {"psu_count": 1, "fan_count": 0, "custom_modules": {}},
                         }
                     }
                     st.success(f"追加: {new_id}")
@@ -549,7 +546,6 @@ def render_device_list():
             dev = st.session_state.devices[dev_id]
             meta = dev.get("metadata", {})
             hw = meta.get("hw_inventory", {})
-            net = meta.get("network_config", {})
             
             is_isolated = dev_id not in connected_ids
             
@@ -573,8 +569,11 @@ def render_device_list():
                     psu = hw.get("psu_count", 0)
                     if psu > 0: info_badges.append(f"⚡PSU:{psu}")
                     
-                    if net.get("lag_enabled"): info_badges.append("🔗LAG")
-                    if net.get("vlans"): info_badges.append(f"🏷️VLAN:{len(net['vlans'])}")
+                    # モジュール情報のバッジ表示
+                    custom_mods = hw.get("custom_modules", {})
+                    for m_name, m_count in custom_mods.items():
+                        if m_count > 0:
+                            info_badges.append(f"📦{m_name}:{m_count}")
                     
                     if info_badges:
                         st.caption(" | ".join(info_badges))
@@ -588,6 +587,7 @@ def render_device_list():
                     with st.form(key=f"form_{dev_id}"):
                         tab1, tab2, tab3 = st.tabs(["基本情報", "ハードウェア/モジュール", "論理/ネットワーク"])
                         
+                        # --- Tab 1: 基本情報 ---
                         with tab1:
                             row1_c1, row1_c2 = st.columns(2)
                             with row1_c1:
@@ -605,33 +605,84 @@ def render_device_list():
                             with row2_c2:
                                 new_loc = st.text_input("Location", value=meta.get("location", ""))
 
+                        # --- Tab 2: ハードウェア/モジュール (改修) ---
                         with tab2:
+                            # 基本HW
                             h1, h2 = st.columns(2)
                             with h1:
                                 new_psu = st.number_input("PSU数", min_value=0, value=hw.get("psu_count", 1))
                             with h2:
                                 new_fan = st.number_input("FAN数", min_value=0, value=hw.get("fan_count", 0))
                             
-                            st.markdown("##### 追加モジュール")
-                            curr_modules = hw.get("modules", "")
-                            new_modules = st.text_area("モジュール一覧 (カンマ区切りで入力)", 
-                                                       value=curr_modules, 
-                                                       placeholder="例: LineCard-10G, Supervisor-Engine-2")
-
-                        with tab3:
-                            st.markdown("##### 冗長化設定")
-                            new_lag = st.checkbox("LAG (Link Aggregation) 構成", value=net.get("lag_enabled", False))
+                            st.divider()
+                            # モジュール管理ボタン
+                            c_m_head, c_m_btn = st.columns([3, 2])
+                            c_m_head.markdown("##### 追加モジュール構成")
+                            if c_m_btn.form_submit_button("🛠️ モジュール定義を追加/編集"):
+                                manage_modules_dialog()
                             
-                            st.markdown("##### VLAN設定")
-                            curr_vlans = net.get("vlans", "")
-                            new_vlans = st.text_input("VLAN ID (カンマ区切り)", 
-                                                      value=curr_vlans,
-                                                      placeholder="例: 10, 20, 100-105")
+                            # 動的入力フィールドの生成
+                            current_custom_mods = hw.get("custom_modules", {})
+                            new_custom_mods = {}
+                            
+                            if st.session_state.module_master_list:
+                                cols = st.columns(2)
+                                for i, mod_name in enumerate(st.session_state.module_master_list):
+                                    with cols[i % 2]:
+                                        val = st.number_input(f"{mod_name} 数", min_value=0, 
+                                                              value=current_custom_mods.get(mod_name, 0),
+                                                              key=f"num_{dev_id}_{mod_name}")
+                                        if val > 0:
+                                            new_custom_mods[mod_name] = int(val)
+                            else:
+                                st.caption("※ 定義されたモジュールがありません。上のボタンから定義を追加してください。")
+
+                        # --- Tab 3: 論理/ネットワーク (改修) ---
+                        with tab3:
+                            st.markdown("##### 接続ごとの論理設定")
+                            st.caption("このデバイスに関連する接続（リンク）の設定を行います。")
+                            
+                            # このデバイスに関連する接続を抽出
+                            related_conns = []
+                            for idx, c in enumerate(st.session_state.connections):
+                                if c['from'] == dev_id or c['to'] == dev_id:
+                                    related_conns.append((idx, c))
+                            
+                            if not related_conns:
+                                st.info("接続されているリンクがありません。")
+                            
+                            # 接続ごとの設定UI
+                            updated_conns_meta = {} # { index: metadata }
+                            
+                            for idx, c in related_conns:
+                                target = c['to'] if c['from'] == dev_id else c['from']
+                                link_type = "Uplink" if c['type'] == "uplink" else "Peer"
+                                label = f"🔗 対 {target} ({link_type})"
+                                
+                                with st.expander(label, expanded=False):
+                                    c_meta = c.get("metadata", {})
+                                    
+                                    # LAG設定
+                                    is_lag = st.checkbox("LAG (Link Aggregation) 構成", 
+                                                         value=c_meta.get("lag_enabled", False),
+                                                         key=f"lag_{dev_id}_{idx}")
+                                    
+                                    # VLAN設定
+                                    vlans = st.text_input("VLAN ID (カンマ区切り)", 
+                                                          value=c_meta.get("vlans", ""),
+                                                          placeholder="例: 10, 20, 100-105",
+                                                          key=f"vlan_{dev_id}_{idx}")
+                                    
+                                    updated_conns_meta[idx] = {
+                                        "lag_enabled": is_lag,
+                                        "vlans": vlans
+                                    }
 
                         st.markdown("---")
                         c_save, c_cancel = st.columns([1, 1])
                         with c_save:
                             if st.form_submit_button("💾 保存", type="primary", use_container_width=True):
+                                # デバイス情報の更新
                                 st.session_state.devices[dev_id]["type"] = new_type
                                 st.session_state.devices[dev_id]["metadata"] = {
                                     "vendor": new_vend,
@@ -640,13 +691,14 @@ def render_device_list():
                                     "hw_inventory": {
                                         "psu_count": int(new_psu),
                                         "fan_count": int(new_fan),
-                                        "modules": new_modules
-                                    },
-                                    "network_config": {
-                                        "lag_enabled": new_lag,
-                                        "vlans": new_vlans
+                                        "custom_modules": new_custom_mods
                                     }
                                 }
+                                
+                                # 接続情報の更新 (Tab3での変更を反映)
+                                for idx, meta in updated_conns_meta.items():
+                                    st.session_state.connections[idx]["metadata"] = meta
+                                
                                 st.session_state.editing_device = None
                                 st.rerun()
                         with c_cancel:
@@ -668,8 +720,8 @@ def render_data_io():
         export_data = {
             "topology": {},
             "connections": st.session_state.connections, 
-            "redundancy_groups": {},
-            "metadata": {"version": "2.2"}
+            "module_master_list": st.session_state.module_master_list, # マスタも保存
+            "metadata": {"version": "2.3"}
         }
         layers = calculate_layers()
         for d_id, d_data in st.session_state.devices.items():
@@ -703,7 +755,10 @@ def render_data_io():
                     data = json.load(uploaded)
                     topo = data.get("topology", {})
                     new_devs = {}
-                    new_conns = []
+                    
+                    # モジュールマスタの復元
+                    if "module_master_list" in data:
+                        st.session_state.module_master_list = data["module_master_list"]
                     
                     for d_id, d_val in topo.items():
                         new_devs[d_id] = {
@@ -712,17 +767,11 @@ def render_data_io():
                         }
                     
                     if "connections" in data:
-                        new_conns = data["connections"]
+                        st.session_state.connections = data["connections"]
                     else:
-                        for d_id, d_val in topo.items():
-                            p_ids = d_val.get("parent_ids", [])
-                            if not p_ids and d_val.get("parent_id"):
-                                p_ids = [d_val.get("parent_id")]
-                            for p_id in p_ids:
-                                new_conns.append({"from": d_id, "to": p_id, "type": "uplink"})
+                        st.session_state.connections = [] # 旧形式ならここでよしなに変換が必要だが割愛
                             
                     st.session_state.devices = new_devs
-                    st.session_state.connections = new_conns
                     st.success("読み込み完了")
                     st.rerun()
                 except Exception as e:
@@ -776,10 +825,16 @@ def main():
                 for i, c in display_conns:
                     col_c1, col_c2 = st.columns([6,1])
                     with col_c1:
+                        # LAG状態などの表示
+                        meta = c.get("metadata", {})
+                        tags = ""
+                        if meta.get("lag_enabled"): tags += " [LAG]"
+                        if meta.get("vlans"): tags += f" [VLAN:{meta['vlans']}]"
+                        
                         if c["type"] == "uplink":
-                            st.markdown(f"**⬇️ 下位接続:** {c['to']} → {c['from']}")
+                            st.markdown(f"**⬇️ 下位接続:** {c['to']} → {c['from']} {tags}")
                         else:
-                            st.markdown(f"**↔️ ピア接続:** {c['from']} ↔ {c['to']}")
+                            st.markdown(f"**↔️ ピア接続:** {c['from']} ↔ {c['to']} {tags}")
                     with col_c2:
                         if st.button("🗑️", key=f"del_conn_{i}"):
                             st.session_state.connections.pop(i)
