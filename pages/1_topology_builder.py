@@ -204,7 +204,7 @@ def generate_visjs_html() -> str:
     nodes_json = json.dumps(nodes_data)
     edges_json = json.dumps(edges_data)
     
-    # 【改修箇所】vis.jsのオプション設定を変更してレイアウトを整える
+    # 【改修箇所】vis.jsのオプションを「幾何学的な整列」優先に変更
     return f"""
     <!DOCTYPE html>
     <html>
@@ -226,25 +226,23 @@ def generate_visjs_html() -> str:
                 layout: {{
                     hierarchical: {{
                         enabled: true,
-                        direction: 'UD',
-                        sortMethod: 'hubsize', 
-                        levelSeparation: 150,
-                        nodeSpacing: 180, 
-                        treeSpacing: 220,
-                        blockShifting: true,
-                        edgeMinimization: true,
-                        parentCentralization: true,
-                        shakeTowards: 'roots'
+                        direction: 'UD',       // 上から下へ
+                        sortMethod: 'directed',// 階層構造を厳密に守る
+                        levelSeparation: 150,  // 上下の間隔
+                        nodeSpacing: 250,      // 左右の間隔（広めに取る）
+                        treeSpacing: 300,      // 異なるツリー間の間隔
+                        
+                        // ここが重要：配置を最適化しすぎず、構造通りに並べる設定
+                        blockShifting: false, 
+                        edgeMinimization: false,
+                        parentCentralization: true // 親を子の中心に配置する
                     }}
                 }},
                 physics: {{ 
-                    enabled: false,
-                    hierarchicalRepulsion: {{
-                        nodeDistance: 180
-                    }}
+                    enabled: false // 物理演算を切って静的に配置（ふらつき防止）
                 }},
                 interaction: {{
-                    dragNodes: false,
+                    dragNodes: true,
                     dragView: true,
                     zoomView: true,
                     hover: true
@@ -367,10 +365,8 @@ def render_device_list():
 
     st.subheader("📋 デバイス操作")
 
-    # 検索フィルター
     search_query = st.text_input("🔍 デバイス検索", placeholder="名前でフィルタ...", label_visibility="collapsed")
 
-    # 接続済みデバイスIDのセットを作成 (孤立判定用)
     connected_ids = set()
     for c in st.session_state.connections:
         connected_ids.add(c["from"])
@@ -389,7 +385,6 @@ def render_device_list():
         if st.session_state.get(f"chk_{dev_id}", False):
             current_selected.append(dev_id)
     
-    # Action Panel
     with st.container(border=True):
         if not current_selected:
             st.info("👇 下のリストから操作したいデバイスにチェックを入れてください")
@@ -424,7 +419,6 @@ def render_device_list():
             if not is_single:
                 st.caption("※「接続」や「編集」は、1つのデバイスのみ選択している場合に有効になります。")
 
-    # デバイスリスト
     with st.container(height=500):
         if not sorted_devs:
             st.write("該当するデバイスはありません。")
@@ -465,7 +459,6 @@ def render_device_list():
                     else:
                         st.caption("No details")
 
-            # 詳細編集パネル
             if st.session_state.editing_device == dev_id:
                 with st.container(border=True):
                     st.info(f"📝 **{dev_id}** を設定中...")
@@ -609,7 +602,6 @@ def main():
         render_device_list()
         
     with col_right:
-        # 接続リストのフィルタリング
         layers = calculate_layers()
         all_devs = sorted(st.session_state.devices.keys(), key=lambda x: (layers.get(x, 1), x))
         current_selected = []
