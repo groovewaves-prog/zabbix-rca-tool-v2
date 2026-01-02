@@ -388,6 +388,17 @@ def connection_dialog(source_id: str, mode: str):
             st.session_state.selected_devices = set()
             st.rerun()
 
+# 【追加】全データクリア確認ダイアログ
+@st.dialog("全データ削除")
+def clear_data_dialog():
+    st.warning("⚠️ **本当にすべてのデータを削除しますか？**\n\n作成したデバイスや接続設定はすべて失われます。この操作は元に戻せません。")
+    if st.button("削除実行", type="primary", use_container_width=True):
+        st.session_state.devices = {}
+        st.session_state.connections = []
+        st.session_state.editing_device = None
+        st.session_state.selected_devices = set()
+        st.rerun()
+
 # ==================== UIコンポーネント ====================
 
 def render_add_device():
@@ -597,15 +608,13 @@ def render_data_io():
     
     c1, c2 = st.columns(2)
     with c1:
-        # ファイル名入力欄を追加
         filename_input = st.text_input("保存ファイル名", value="topology.json")
         if not filename_input.endswith(".json"):
             filename_input += ".json"
 
-        # 【重要】connectionsリストを明示的に保存する
         export_data = {
             "topology": {},
-            "connections": st.session_state.connections, # ここで接続リストを保存
+            "connections": st.session_state.connections, 
             "redundancy_groups": {},
             "metadata": {"version": "2.2"}
         }
@@ -632,7 +641,7 @@ def render_data_io():
         )
 
     with c2:
-        st.write("") # スペース調整
+        st.write("") 
         st.write("")
         uploaded = st.file_uploader("📤 JSON読み込み", type=["json"])
         if uploaded:
@@ -643,18 +652,15 @@ def render_data_io():
                     new_devs = {}
                     new_conns = []
                     
-                    # 1. デバイス情報の復元
                     for d_id, d_val in topo.items():
                         new_devs[d_id] = {
                             "type": d_val.get("type", "SWITCH"),
                             "metadata": d_val.get("metadata", {})
                         }
                     
-                    # 2. 接続情報の復元 (新形式 "connections" を優先)
                     if "connections" in data:
                         new_conns = data["connections"]
                     else:
-                        # 旧形式 (parent_ids) からの復元ロジック (後方互換性)
                         for d_id, d_val in topo.items():
                             p_ids = d_val.get("parent_ids", [])
                             if not p_ids and d_val.get("parent_id"):
@@ -668,6 +674,11 @@ def render_data_io():
                     st.rerun()
                 except Exception as e:
                     st.error(f"エラー: {e}")
+    
+    # 【機能追加】全クリアボタン
+    st.markdown("---")
+    if st.button("🗑️ 全データをクリア (初期化)", type="primary", use_container_width=True):
+        clear_data_dialog()
 
 # ==================== メイン ====================
 def main():
