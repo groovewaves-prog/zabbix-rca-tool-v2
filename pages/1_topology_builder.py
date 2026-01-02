@@ -1,6 +1,7 @@
 import streamlit as st
 import streamlit.components.v1 as components
 import json
+import statistics
 from typing import Dict, List, Set
 
 # ==================== ページ設定 ====================
@@ -39,38 +40,29 @@ def init_session():
 
 # ==================== ロジック・計算 ====================
 def calculate_layers() -> Dict[str, int]:
-    """
-    接続関係からレイヤー（Y軸）を自動計算する。
-    【修正版】最長パス法を用いて、親が複数いる場合は「最も深い親」に合わせて子を配置する。
-    これにより、一部のリンクが切れても全体の形状が崩れにくくなる。
-    """
+    """接続関係からレイヤー（Y軸）を自動計算（最長パス法）"""
     devices = st.session_state.devices
     connections = st.session_state.connections
     
     if not devices:
         return {}
     
-    # 1. 全ノードを初期レイヤー1に設定
+    # 全ノードを初期レイヤー1
     layers = {d: 1 for d in devices}
     
-    # 2. 接続されているかどうかの判定用
+    # 接続ノード判定
     connected_nodes = set()
     for c in connections:
         connected_nodes.add(c['from'])
         connected_nodes.add(c['to'])
 
-    # 3. 反復計算でレイヤーを確定させる (ベルマン・フォード的な緩和処理)
-    # ループ回数はノード数分あれば十分収束する
+    # レイヤーの深さを計算
     for _ in range(len(devices)):
         changed = False
         for c in connections:
             if c['type'] == 'uplink':
-                # データ構造: from=Child, to=Parent
-                # 視覚的構造: Parent(上) -> Child(下)
-                # ルール: Childのレイヤーは、Parentのレイヤー + 1 以上でなければならない
                 parent = c['to']
                 child = c['from']
-                
                 if parent in layers and child in layers:
                     if layers[child] < layers[parent] + 1:
                         layers[child] = layers[parent] + 1
@@ -78,7 +70,7 @@ def calculate_layers() -> Dict[str, int]:
         if not changed:
             break
             
-    # 4. 孤立ノード（リンクが1本もない）は強制的に Layer 0（最上段）へ
+    # 孤立ノードは Layer 0
     for d in devices:
         if d not in connected_nodes:
             layers[d] = 0
@@ -87,35 +79,90 @@ def calculate_layers() -> Dict[str, int]:
 
 def calculate_positions(layers: Dict[str, int]) -> Dict[str, Dict[str, int]]:
     """
-    各ノードのX, Y座標を決定するアルゴリズム
-    - Y軸: レイヤー番号 x 高さ
-    - X軸: 各レイヤーのノード群を中央揃え
+    【アルゴリズム改善版】杉山アルゴリズムの重心法(Barycenter Method)を応用。
+    親ノードの位置に基づいて子ノードの並び順を決定し、エッジの交差を最小化・対称性を確保する。
     """
     positions = {}
+    connections = st.session_state.connections
     
-    # レイヤーごとにノードをグループ化
-    layer_groups = {}
+    # 1. レイヤーごとにノードをグループ化
+    layer_map = {} # { 1: [nodeA, nodeB], 2: [nodeC]... }
+    max_layer = 0
     for node, layer in layers.items():
-        if layer not in layer_groups:
-            layer_groups[layer] = []
-        layer_groups[layer].append(node)
-    
-    # 名前順にソートして並びを安定させる
-    for layer in layer_groups:
-        layer_groups[layer].sort()
+        if layer not in layer_map:
+            layer_map[layer] = []
+        layer_map[layer].append(node)
+        if layer > max_layer:
+            max_layer = layer
 
-    # 座標計算定数
+    # 2. 親子関係マップの作成 (Child -> Parents)
+    child_to_parents = {}
+    for c in connections:
+        if c['type'] == 'uplink':
+            child = c['from']
+            parent = c['to']
+            if child not in child_to_parents:
+                child_to_parents[child] = []
+            child_to_parents[child].append(parent)
+
+    # 3. 座標計算定数
     Y_SPACING = 150
-    X_SPACING = 200
+    X_SPACING = 220 # 少し広めにとる
 
-    for layer, nodes in layer_groups.items():
-        count = len(nodes)
-        # 行全体の幅
+    # 4. レイヤー順にX座標を決定していく
+    # Layer 0 (孤立) と Layer 1 (ルート) は名前順で初期配置
+    for layer in [0, 1]:
+        if layer in layer_map:
+            # 名前順でソート
+            layer_map[layer].sort()
+            
+            # 配置
+            nodes = layer_map[layer]
+            count = len(nodes)
+            total_width = (count - 1) * X_SPACING
+            start_x = -total_width / 2
+            
+            for i, node in enumerate(nodes):
+                positions[node] = {"x": int(start_x + (i * X_SPACING)), "y": int(layer * Y_SPACING)}
+
+    # Layer 2以降: 親の座標の「重心」を計算してソート順を決める
+    for layer in range(2, max_layer + 1):
+        if layer not in layer_map:
+            continue
+            
+        nodes = layer_map[layer]
+        
+        # 各ノードの「重み（親のX座標の平均）」を計算
+        node_weights = []
+        for node in nodes:
+            parents = child_to_parents.get(node, [])
+            parent_x_sum = 0
+            valid_parents = 0
+            
+            for p in parents:
+                if p in positions: # 親の座標が確定している場合
+                    parent_x_sum += positions[p]["x"]
+                    valid_parents += 1
+            
+            if valid_parents > 0:
+                avg_x = parent_x_sum / valid_parents
+            else:
+                # 親がいない、または上のレイヤーにいない場合は名前を重みにする(後ろに回す)
+                avg_x = 99999 
+            
+            node_weights.append((avg_x, node))
+        
+        # 重み（親の重心位置）順、次いで名前順にソート
+        # これにより、左の親の子は左に、右の親の子は右に、両方の親の子は真ん中に来る
+        node_weights.sort(key=lambda x: (x[0], x[1]))
+        sorted_nodes = [n[1] for n in node_weights]
+        
+        # 座標を確定
+        count = len(sorted_nodes)
         total_width = (count - 1) * X_SPACING
-        # 左端の開始位置（0を中心とする）
         start_x = -total_width / 2
         
-        for i, node in enumerate(nodes):
+        for i, node in enumerate(sorted_nodes):
             x = start_x + (i * X_SPACING)
             y = layer * Y_SPACING
             positions[node] = {"x": int(x), "y": int(y)}
@@ -189,7 +236,7 @@ def generate_visjs_html() -> str:
                    background:#f5f5f5;border-radius:8px;'>
                    📍 デバイスを追加してください</div>"""
     
-    # 座標計算を実行
+    # 座標計算を実行 (Barycenter Method)
     layers = calculate_layers()
     positions = calculate_positions(layers)
     
@@ -199,7 +246,6 @@ def generate_visjs_html() -> str:
         style = DEVICE_TYPES.get(dev_type, DEVICE_TYPES["SWITCH"])
         vendor = dev.get("metadata", {}).get("vendor") or ""
         
-        # 計算された座標を取得
         pos = positions.get(dev_id, {"x": 0, "y": 0})
         
         label = f"{dev_id}"
@@ -220,7 +266,7 @@ def generate_visjs_html() -> str:
             "shape": "box",
             "margin": 10,
             "shadow": True,
-            "physics": False # 固定配置
+            "physics": False
         })
     
     edges_data = []
@@ -234,7 +280,7 @@ def generate_visjs_html() -> str:
                 "arrows": "to",
                 "color": {"color": "#555"},
                 "width": 2,
-                "smooth": False # 直線
+                "smooth": False
             })
         else:
             # Peer接続
@@ -245,7 +291,7 @@ def generate_visjs_html() -> str:
                 "dashes": [8, 8],
                 "arrows": "",
                 "width": 3,
-                "smooth": False # 直線
+                "smooth": False
             })
     
     nodes_json = json.dumps(nodes_data)
@@ -272,11 +318,11 @@ def generate_visjs_html() -> str:
             var options = {{
                 layout: {{
                     hierarchical: {{
-                        enabled: false // 自動レイアウトOFF
+                        enabled: false
                     }}
                 }},
                 physics: {{ 
-                    enabled: false // 物理演算OFF
+                    enabled: false
                 }},
                 interaction: {{
                     dragNodes: true,
@@ -285,7 +331,7 @@ def generate_visjs_html() -> str:
                     hover: true
                 }},
                 nodes: {{ borderWidth: 2 }},
-                edges: {{ smooth: false }} // 全体設定でも直線を強制
+                edges: {{ smooth: false }}
             }};
             
             var network = new vis.Network(container, data, options);
@@ -705,8 +751,7 @@ def main():
                     col_c1, col_c2 = st.columns([6,1])
                     with col_c1:
                         if c["type"] == "uplink":
-                            # 【修正箇所】表示を 親 → 子 に修正
-                            # to=Parent, from=Child なので to -> from となる
+                            # 親 → 子 の表記に変更
                             st.markdown(f"**⬇️ 下位接続:** {c['to']} → {c['from']}")
                         else:
                             st.markdown(f"**↔️ ピア接続:** {c['from']} ↔ {c['to']}")
