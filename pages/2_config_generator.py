@@ -9,6 +9,7 @@ import os
 import requests
 import pandas as pd
 import time
+import random
 from typing import Dict, List, Any
 
 # Google Generative AI ライブラリのインポート試行
@@ -90,7 +91,6 @@ DEFAULT_TEMPLATE_MAPPING = {
 
 # ==================== データI/O関数 ====================
 def load_full_topology_data():
-    """トポロジーファイル全体を読み込む（site_name取得のため）"""
     path = os.path.join(DATA_DIR, "topology.json")
     if os.path.exists(path):
         with open(path, "r", encoding="utf-8") as f:
@@ -118,7 +118,7 @@ def save_json_config(filename, data):
 def save_trigger_rules(rules):
     save_json_config("trigger_rules.json", rules)
 
-# ==================== AIエージェント ====================
+# ==================== AIエージェント (Gemma 3対応 & 演出強化) ====================
 class TemplateRecommenderAI:
     def __init__(self):
         self.api_key = st.secrets.get("GOOGLE_API_KEY") or os.getenv("GOOGLE_API_KEY")
@@ -137,8 +137,23 @@ class TemplateRecommenderAI:
         return sanitized_list
 
     def recommend(self, raw_devices_summary: List[Dict]) -> List[Dict]:
+        """
+        デバイスリストを受け取り、最適なZabbixテンプレート名を推論して返す。
+        処理経過をst.writeで出力する。
+        """
+        # 1. データ抽出
+        st.write("🔍 トポロジーデータからデバイス情報を抽出しています...")
+        time.sleep(0.8) # 演出ウェイト
         sanitized_devices = self.sanitize_device_data(raw_devices_summary)
-        st.write("🤖 AIエージェント(Gemma 3)がデバイス情報を分析中...")
+        st.write(f"📋 対象デバイス: {len(sanitized_devices)} 件のユニークなモデルを検出しました。")
+        
+        # 2. ベンダー分析
+        time.sleep(0.8)
+        vendors = set(d['vendor'] for d in sanitized_devices if d['vendor'] != "Unknown")
+        st.write(f"🏢 検出されたベンダー: {', '.join(vendors)} を分析中...")
+        
+        # 3. AI推論 (API or Mock)
+        st.write("🤖 AIモデル (Gemma 3) に問い合わせを実行中...")
         
         if self.api_key and HAS_GEMINI:
             try:
@@ -159,28 +174,61 @@ class TemplateRecommenderAI:
                 """
                 
                 response = model.generate_content(prompt)
+                
+                # 思考時間を少し待つ演出
+                time.sleep(1.5)
+                
                 content = response.text
                 if "```json" in content:
                     content = content.split("```json")[1].split("```")[0]
                 elif "```" in content:
                     content = content.split("```")[0]
                 
-                return json.loads(content.strip())
+                recommendations = json.loads(content.strip())
+                st.write("✅ AIからの回答を受信しました。")
+                return recommendations
 
             except Exception as e:
                 st.error(f"AI API Error: {e}")
                 st.warning("AI通信に失敗しました。モックロジックに切り替えます。")
         
-        time.sleep(1.0) 
+        # Mock Logic (APIがない場合やエラー時のフォールバック)
+        time.sleep(1.5) # AIが考えている風のウェイト
+        st.write("🧠 知識ベースと照合中 (Mock)...")
+        time.sleep(1.0)
+        
         recommendations = []
         for dev in sanitized_devices:
-            # (省略: 前述のモックロジックと同様)
             vendor = dev['vendor'].lower()
             dtype = dev['type'].upper()
-            template = "Template Module ICMP Ping"
-            if "cisco" in vendor and dtype == "SWITCH": template = "Template Net Cisco IOS SNMP"
-            # ... 他のルール ...
-            recommendations.append({"vendor": dev['vendor'], "type": dev['type'], "template": template})
+            model = dev['model'].lower()
+            
+            template = "Template Module ICMP Ping" 
+            
+            if "cisco" in vendor:
+                if "catalyst" in model or "c9" in model or dtype == "SWITCH":
+                    template = "Template Net Cisco IOS SNMP"
+                elif "nexus" in model:
+                    template = "Template Net Cisco Nexus SNMP"
+                else:
+                    template = "Template Net Cisco IOS SNMP"
+            elif "juniper" in vendor:
+                template = "Template Net Juniper SNMP"
+            elif "fortinet" in vendor:
+                template = "Template Net Fortinet FortiGate SNMP"
+            elif "linux" in vendor or dtype == "SERVER":
+                template = "Template OS Linux by Zabbix agent"
+            elif "windows" in vendor:
+                template = "Template OS Windows by Zabbix agent"
+
+            recommendations.append({
+                "vendor": dev['vendor'],
+                "type": dev['type'],
+                "template": template
+            })
+        
+        st.write("✅ テンプレートのマッピングが完了しました。")
+        time.sleep(0.5)
         return recommendations
 
 # ==================== Zabbix API クライアント ====================
@@ -221,7 +269,7 @@ class MockZabbixAPI:
         return {}
     def check_connection(self): return self.call("apiinfo.version")
 
-# ==================== 設定生成ロジック (修正版) ====================
+# ==================== 設定生成ロジック ====================
 def determine_template(vendor, device_type, mapping_data):
     for rule in mapping_data.get("mappings", []):
         if rule.get("vendor") == vendor and rule.get("type") == device_type:
@@ -230,57 +278,34 @@ def determine_template(vendor, device_type, mapping_data):
     return defaults.get(device_type, defaults.get("default", "Template Module ICMP Ping"))
 
 def generate_zabbix_config(full_data: Dict, options: Dict, trigger_rules: List, template_mapping: Dict) -> Dict:
-    """
-    【修正】full_data (JSON全体) を受け取り、site_nameを参照するように変更
-    """
-    # ルートから情報を取得
     site_name = full_data.get("site_name", "Unknown-Site")
     topology = full_data.get("topology", {})
     connections = full_data.get("connections", [])
-    
-    # マスタデータからも取得可能だが、topology内の各ホストのmetadataを使用
-    # module_master = full_data.get("master_data", {}).get("modules", []) 
-    # もしくはセッションやファイルから読み込むが、ここではtopology内の利用実績ベースで動くようにする
-    # 簡易的にセッション内のマスタがあればそれを使う
     module_master = st.session_state.get("module_master_list", ["LineCard", "Supervisor", "SFP+"])
 
     config = {
-        "host_groups": [],
-        "hosts": [],
-        "actions": [],
-        "dependencies": [], 
-        "summary": {}
+        "host_groups": [], "hosts": [], "actions": [], "dependencies": [], "summary": {}
     }
     
     if not topology: return config
 
-    # 1. ホストグループ生成 (Site Name ベース)
-    # 構成: [Site Name], [Site Name]/[Device Type]
+    # 1. Host Groups
     groups = set()
-    groups.add(site_name) # 親グループ (例: Tokyo)
-    
+    groups.add(site_name)
     for d in topology.values():
         dev_type = d.get("type", "Other")
-        groups.add(f"{site_name}/{dev_type}") # 子グループ (例: Tokyo/SWITCH)
-
+        groups.add(f"{site_name}/{dev_type}")
     config["host_groups"] = [{"name": g} for g in sorted(groups)]
 
-    # 2. ホスト設定
+    # 2. Hosts
     for dev_id, dev_data in topology.items():
         meta = dev_data.get("metadata", {})
         hw = meta.get("hw_inventory", {})
-        
         vendor = meta.get("vendor", "default")
         dev_type = dev_data.get("type", "Other")
-        
-        # 個別の設置場所 (Rack Info)
-        # 1_topology_builder.py で rack_info に保存されている
-        # 互換性のため location にも入っているが、明示的に rack_info を優先
         rack_info = meta.get("rack_info") or meta.get("location") or "Unspecified"
         
-        # 所属グループ
         host_groups = [{"name": site_name}, {"name": f"{site_name}/{dev_type}"}]
-        
         template_name = determine_template(vendor, dev_type, template_mapping)
         
         interfaces = [{
@@ -293,9 +318,8 @@ def generate_zabbix_config(full_data: Dict, options: Dict, trigger_rules: List, 
         if hw.get("psu_count"): macros.append({"macro": "{$EXPECTED_PSU_COUNT}", "value": str(hw["psu_count"])})
         if hw.get("fan_count"): macros.append({"macro": "{$EXPECTED_FAN_COUNT}", "value": str(hw["fan_count"])})
         
-        custom_mods = hw.get("custom_modules", {})
         for mod_name in module_master:
-            count = custom_mods.get(mod_name, 0)
+            count = hw.get("custom_modules", {}).get(mod_name, 0)
             safe_name = mod_name.upper().replace("-", "_").replace(" ", "_").replace("+", "PLUS")
             macros.append({"macro": f"{{$EXPECTED_{safe_name}_COUNT}}", "value": str(count)})
 
@@ -303,15 +327,13 @@ def generate_zabbix_config(full_data: Dict, options: Dict, trigger_rules: List, 
             if rule.get("threshold_macro") and rule.get("default_value") is not None:
                 macros.append({"macro": rule["threshold_macro"], "value": str(rule["default_value"])})
 
-        # タグ設定
         tags = [
             {"tag": "Layer", "value": str(dev_data.get("layer", 0))},
             {"tag": "Vendor", "value": vendor},
             {"tag": "Model", "value": meta.get("model", "Unknown")},
-            {"tag": "Location", "value": rack_info} # ここに詳細な場所(Rack)を入れる
+            {"tag": "Location", "value": rack_info}
         ]
         
-        # ... (LAG/VLANタグ処理は同じ) ...
         has_lag = False
         vlan_ids = set()
         for c in connections:
@@ -332,7 +354,7 @@ def generate_zabbix_config(full_data: Dict, options: Dict, trigger_rules: List, 
         }
         config["hosts"].append(host_obj)
 
-    # 3. 依存関係
+    # 3. Dependencies
     for c in connections:
         if c["type"] == "uplink":
             child = c["from"]
@@ -342,7 +364,7 @@ def generate_zabbix_config(full_data: Dict, options: Dict, trigger_rules: List, 
                 "description": f"Uplink: {child} -> {parent}"
             })
 
-    # 4. アクション
+    # 4. Actions
     if options["create_action"]:
         config["actions"].append({
             "name": "Report problems to Admin",
@@ -358,7 +380,7 @@ def generate_zabbix_config(full_data: Dict, options: Dict, trigger_rules: List, 
     }
     return config
 
-# ... (push_config_to_zabbix は変更なしのため省略可能だが、念のため記載) ...
+# ==================== API投入ロジック ====================
 def push_config_to_zabbix(api: Any, config: Dict):
     logs = []
     st.write("📂 ホストグループを確認中...")
@@ -447,6 +469,7 @@ def main():
                     if not zabbix_url: raise Exception("URLを入力してください")
                     api = ZabbixAPI(zabbix_url, zabbix_token)
                     st.session_state.is_mock = False
+                
                 ver = api.check_connection()
                 st.session_state.zabbix_connected = True
                 st.success(f"接続OK: {ver}")
@@ -456,14 +479,14 @@ def main():
         
     col1, col2 = st.columns([3, 1])
     with col1:
-        st.title("⚙️ 監視設定生成 (AI Assisted - Gemma 3)")
+        st.title("⚙️ 監視設定生成 (AI Assisted)")
     with col2:
         if st.button("🏠 ホーム", use_container_width=True):
             st.switch_page("Home.py")
     
     st.divider()
 
-    # データロード処理の変更: load_full_topology_data を使用
+    # データロード
     full_data = None
     if uploaded_file:
         full_data = json.load(uploaded_file)
@@ -477,12 +500,16 @@ def main():
         st.warning("⚠️ データがありません。ファイルをアップロードするかトポロジービルダーを実行してください。")
         return
 
+    # 設定ロード
     trigger_rules = load_json_config("trigger_rules.json", DEFAULT_TRIGGER_RULES)
     template_mapping = load_json_config("template_mapping.json", DEFAULT_TEMPLATE_MAPPING)
 
+    # --- AIテンプレートレコメンド ---
     with st.expander("🤖 テンプレート自動マッピング (AI)", expanded=True):
         st.write("トポロジー内のデバイス情報（ベンダー、モデル）を分析し、最適なZabbixテンプレートを自動割り当てします。")
-        if st.button("✨ AI (Gemma 3) で推奨テンプレートを生成・適用", type="primary"):
+        
+        # 【修正】ボタン名称変更
+        if st.button("✨ AIで推奨テンプレートを生成・適用", type="primary"):
             devices_summary = []
             seen = set()
             for d in full_data["topology"].values():
@@ -495,17 +522,28 @@ def main():
             if not devices_summary:
                 st.warning("有効なベンダー情報を持つデバイスが見つかりませんでした。")
             else:
-                ai = TemplateRecommenderAI()
-                recommendations = ai.recommend(devices_summary)
-                current_mappings = template_mapping.get("mappings", [])
-                added_count = 0
-                for rec in recommendations:
-                    exists = any(m["vendor"] == rec["vendor"] and m["type"] == rec["type"] for m in current_mappings)
-                    if not exists:
-                        current_mappings.append(rec)
-                        added_count += 1
-                template_mapping["mappings"] = current_mappings
-                save_json_config("template_mapping.json", template_mapping)
+                # 【修正】処理経過の可視化 (st.status)
+                with st.status("🤖 AIエージェントが分析中...", expanded=True) as status:
+                    ai = TemplateRecommenderAI()
+                    # recommend内部で st.write を呼ぶため、status内で実行
+                    recommendations = ai.recommend(devices_summary)
+                    
+                    st.write("マッピングルールを更新しています...")
+                    current_mappings = template_mapping.get("mappings", [])
+                    added_count = 0
+                    for rec in recommendations:
+                        exists = any(
+                            m["vendor"] == rec["vendor"] and m["type"] == rec["type"] 
+                            for m in current_mappings
+                        )
+                        if not exists:
+                            current_mappings.append(rec)
+                            added_count += 1
+                    
+                    template_mapping["mappings"] = current_mappings
+                    save_json_config("template_mapping.json", template_mapping)
+                    status.update(label="✅ 完了", state="complete", expanded=False)
+                
                 st.success(f"✅ {added_count} 件の新しいマッピングルールを追加しました！")
                 st.rerun()
 
@@ -515,28 +553,79 @@ def main():
         else:
             st.info("現在、固有のマッピングルールはありません")
 
-    with st.expander("🛠️ 監視パラメータ設定", expanded=False):
-        c1, c2, c3 = st.columns(3)
-        with c1: ping_type = st.radio("Ping監視タイプ", ["simple", "loss"], format_func=lambda x: "死活監視" if x == "simple" else "品質監視")
-        with c2: monitor_interval = st.slider("基本監視間隔 (秒)", 30, 300, 60, 30)
-        with c3: create_action = st.toggle("標準通知設定を作成", value=True)
+    # --- 【修正】閾値と監視間隔の設定UI ---
+    st.subheader("🛠️ 監視ルール・閾値の設定")
+    
+    with st.container(border=True):
+        col_param1, col_param2, col_param3 = st.columns(3)
+        with col_param1:
+            ping_type = st.radio("Ping監視タイプ", ["simple", "loss"], 
+                               format_func=lambda x: "死活監視 (0/1)" if x == "simple" else "品質監視 (Loss %)")
+        with col_param2:
+            monitor_interval = st.slider("基本監視間隔 (秒)", 30, 300, 60, 30)
+        with col_param3:
+            create_action = st.toggle("標準通知設定を作成", value=True)
 
+        st.divider()
+        st.markdown("##### トリガー閾値カスタマイズ")
+        
+        # 閾値を持つルールを抽出して編集可能にする
+        threshold_rules = [r for r in trigger_rules if r.get("threshold_macro")]
+        if not threshold_rules:
+            st.info("カスタマイズ可能な閾値定義がありません。")
+        else:
+            # 3列で表示
+            cols = st.columns(3)
+            updated_rules = trigger_rules.copy()
+            is_changed = False
+            
+            for i, rule in enumerate(threshold_rules):
+                col = cols[i % 3]
+                current_val = rule.get("default_value", "")
+                unit = rule.get("unit", "")
+                
+                new_val = col.text_input(
+                    f"{rule['name']} ({unit})",
+                    value=current_val,
+                    key=f"thresh_{rule['id']}",
+                    help=f"マクロ: {rule['threshold_macro']}"
+                )
+                
+                if new_val != current_val:
+                    for r in updated_rules:
+                        if r["id"] == rule["id"]:
+                            r["default_value"] = new_val
+                            is_changed = True
+            
+            if is_changed:
+                if st.button("閾値を保存して再計算", type="primary"):
+                    save_trigger_rules(updated_rules)
+                    st.rerun()
+
+    # 設定生成
     options = {"ping_type": ping_type, "interval": monitor_interval, "create_action": create_action}
-    # 引数を変更: data -> full_data
     config = generate_zabbix_config(full_data, options, trigger_rules, template_mapping)
     
     st.subheader("1. 設定内容の確認")
+    
     k1, k2, k3, k4 = st.columns(4)
     k1.metric("ホスト数", len(config["hosts"]))
     k2.metric("グループ数", len(config["host_groups"]))
     k3.metric("アクション", len(config["actions"]))
     k4.metric("依存関係", len(config["dependencies"]))
 
-    tab_host, tab_group, tab_dep, tab_json = st.tabs(["🖥️ ホスト詳細", "📂 グループ構成", "🔗 依存関係", "🔍 JSON"])
+    tab_host, tab_group, tab_dep, tab_json = st.tabs([
+        "🖥️ ホスト詳細", "📂 グループ構成", "🔗 依存関係", "🔍 JSON"
+    ])
+
     with tab_host:
         df_hosts = []
         for h in config["hosts"]:
-            macros_display = [f"{m['macro']}={m['value']}" for m in h["macros"]]
+            macros_display = []
+            for m in h["macros"]:
+                val = m['value']
+                macros_display.append(f"{m['macro']}={val}")
+            
             df_hosts.append({
                 "ホスト名": h["host"],
                 "テンプレート": h["templates"][0]["name"],
@@ -549,21 +638,39 @@ def main():
         st.caption(f"※ 拠点名({full_data.get('site_name','Unknown')})/機器タイプ の階層構造")
         st.dataframe(pd.DataFrame(config["host_groups"]), use_container_width=True)
 
-    with tab_dep: st.dataframe(pd.DataFrame(config["dependencies"]), use_container_width=True)
-    with tab_json: st.json(config)
+    with tab_dep:
+        st.dataframe(pd.DataFrame(config["dependencies"]), use_container_width=True)
+
+    with tab_json:
+        st.json(config)
 
     st.divider()
+    
     st.subheader("2. 実行")
     c_dl, c_push = st.columns(2)
+    
     with c_dl:
-        st.download_button("📥 設定ファイルを保存", json.dumps(config, indent=2, ensure_ascii=False), "zabbix_config.json", "application/json", use_container_width=True)
+        st.download_button(
+            "📥 設定ファイルを保存",
+            data=json.dumps(config, indent=2, ensure_ascii=False),
+            file_name="zabbix_config.json",
+            mime="application/json",
+            use_container_width=True
+        )
+        
     with c_push:
-        if not st.session_state.zabbix_connected: st.button("Zabbixへ投入 (未接続)", disabled=True, use_container_width=True)
-        elif len(config["hosts"]) == 0: st.button("データなし", disabled=True, use_container_width=True)
+        if not st.session_state.zabbix_connected:
+            st.button("Zabbixへ投入 (未接続)", disabled=True, use_container_width=True)
+        elif len(config["hosts"]) == 0:
+            st.button("データなし", disabled=True, use_container_width=True)
         else:
             if st.button("🚀 Zabbixへ投入開始", type="primary", use_container_width=True):
-                if st.session_state.is_mock: api = MockZabbixAPI()
-                else: api = ZabbixAPI(zabbix_url, zabbix_token)
+                
+                if st.session_state.is_mock:
+                    api = MockZabbixAPI()
+                else:
+                    api = ZabbixAPI(zabbix_url, zabbix_token)
+                
                 with st.status("処理を実行中...", expanded=True) as status:
                     try:
                         logs = push_config_to_zabbix(api, config)
