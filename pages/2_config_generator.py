@@ -9,7 +9,6 @@ import os
 import requests
 import pandas as pd
 import time
-import random
 from typing import Dict, List, Any
 
 # Google Generative AI ライブラリのインポート試行
@@ -91,6 +90,7 @@ DEFAULT_TEMPLATE_MAPPING = {
 
 # ==================== データI/O関数 ====================
 def load_full_topology_data():
+    """トポロジーファイル全体を読み込む"""
     path = os.path.join(DATA_DIR, "topology.json")
     if os.path.exists(path):
         with open(path, "r", encoding="utf-8") as f:
@@ -118,7 +118,7 @@ def save_json_config(filename, data):
 def save_trigger_rules(rules):
     save_json_config("trigger_rules.json", rules)
 
-# ==================== AIエージェント (Gemma 3対応 & 演出強化) ====================
+# ==================== AIエージェント ====================
 class TemplateRecommenderAI:
     def __init__(self):
         self.api_key = st.secrets.get("GOOGLE_API_KEY") or os.getenv("GOOGLE_API_KEY")
@@ -137,26 +137,16 @@ class TemplateRecommenderAI:
         return sanitized_list
 
     def recommend(self, raw_devices_summary: List[Dict]) -> List[Dict]:
-        """
-        デバイスリストを受け取り、最適なZabbixテンプレート名を推論して返す。
-        処理経過をst.writeで出力する。
-        """
-        # 1. データ抽出
-        st.write("🔍 トポロジーデータからデバイス情報を抽出しています...")
-        time.sleep(0.8) # 演出ウェイト
         sanitized_devices = self.sanitize_device_data(raw_devices_summary)
+        
+        st.write("🔍 トポロジーデータからデバイス情報を抽出しています...")
+        time.sleep(0.5) 
         st.write(f"📋 対象デバイス: {len(sanitized_devices)} 件のユニークなモデルを検出しました。")
         
-        # 2. ベンダー分析
-        time.sleep(0.8)
-        vendors = set(d['vendor'] for d in sanitized_devices if d['vendor'] != "Unknown")
-        st.write(f"🏢 検出されたベンダー: {', '.join(vendors)} を分析中...")
-        
-        # 3. AI推論 (API or Mock)
-        st.write("🤖 AIモデル (Gemma 3) に問い合わせを実行中...")
-        
+        # Google Gemini API
         if self.api_key and HAS_GEMINI:
             try:
+                st.write("🤖 AIモデル (Gemma 3) に問い合わせを実行中...")
                 genai.configure(api_key=self.api_key)
                 model = genai.GenerativeModel('gemma-3-12b-it')
                 
@@ -174,10 +164,6 @@ class TemplateRecommenderAI:
                 """
                 
                 response = model.generate_content(prompt)
-                
-                # 思考時間を少し待つ演出
-                time.sleep(1.5)
-                
                 content = response.text
                 if "```json" in content:
                     content = content.split("```json")[1].split("```")[0]
@@ -192,46 +178,23 @@ class TemplateRecommenderAI:
                 st.error(f"AI API Error: {e}")
                 st.warning("AI通信に失敗しました。モックロジックに切り替えます。")
         
-        # Mock Logic (APIがない場合やエラー時のフォールバック)
-        time.sleep(1.5) # AIが考えている風のウェイト
-        st.write("🧠 知識ベースと照合中 (Mock)...")
+        # Mock Logic
         time.sleep(1.0)
+        st.write("🧠 知識ベースと照合中 (Mock)...")
+        time.sleep(0.5)
         
         recommendations = []
         for dev in sanitized_devices:
             vendor = dev['vendor'].lower()
             dtype = dev['type'].upper()
-            model = dev['model'].lower()
-            
-            template = "Template Module ICMP Ping" 
-            
-            if "cisco" in vendor:
-                if "catalyst" in model or "c9" in model or dtype == "SWITCH":
-                    template = "Template Net Cisco IOS SNMP"
-                elif "nexus" in model:
-                    template = "Template Net Cisco Nexus SNMP"
-                else:
-                    template = "Template Net Cisco IOS SNMP"
-            elif "juniper" in vendor:
-                template = "Template Net Juniper SNMP"
-            elif "fortinet" in vendor:
-                template = "Template Net Fortinet FortiGate SNMP"
-            elif "linux" in vendor or dtype == "SERVER":
-                template = "Template OS Linux by Zabbix agent"
-            elif "windows" in vendor:
-                template = "Template OS Windows by Zabbix agent"
-
-            recommendations.append({
-                "vendor": dev['vendor'],
-                "type": dev['type'],
-                "template": template
-            })
+            template = "Template Module ICMP Ping"
+            if "cisco" in vendor and dtype == "SWITCH": template = "Template Net Cisco IOS SNMP"
+            recommendations.append({"vendor": dev['vendor'], "type": dev['type'], "template": template})
         
         st.write("✅ テンプレートのマッピングが完了しました。")
-        time.sleep(0.5)
         return recommendations
 
-# ==================== Zabbix API クライアント ====================
+# ==================== Zabbix API Client ====================
 class ZabbixAPI:
     def __init__(self, url: str, token: str):
         self.url = url.rstrip('/') + '/api_jsonrpc.php'
@@ -486,17 +449,16 @@ def main():
     
     st.divider()
 
-    # データロード
-    full_data = None
+    data = None
     if uploaded_file:
-        full_data = json.load(uploaded_file)
+        data = json.load(uploaded_file)
         st.info(f"📂 ファイル読み込み: {uploaded_file.name}")
     else:
-        full_data = load_full_topology_data()
-        if full_data and full_data.get("topology"):
+        data = load_full_topology_data()
+        if data and data.get("topology"):
             st.info("📂 サーバー上のデータを使用")
     
-    if not full_data:
+    if not data:
         st.warning("⚠️ データがありません。ファイルをアップロードするかトポロジービルダーを実行してください。")
         return
 
@@ -508,11 +470,11 @@ def main():
     with st.expander("🤖 テンプレート自動マッピング (AI)", expanded=True):
         st.write("トポロジー内のデバイス情報（ベンダー、モデル）を分析し、最適なZabbixテンプレートを自動割り当てします。")
         
-        # 【修正】ボタン名称変更
+        # ボタン名称変更
         if st.button("✨ AIで推奨テンプレートを生成・適用", type="primary"):
             devices_summary = []
             seen = set()
-            for d in full_data["topology"].values():
+            for d in data["topology"].values():
                 meta = d.get("metadata", {})
                 key = (meta.get("vendor"), d.get("type"), meta.get("model"))
                 if key not in seen and key[0]:
@@ -522,10 +484,8 @@ def main():
             if not devices_summary:
                 st.warning("有効なベンダー情報を持つデバイスが見つかりませんでした。")
             else:
-                # 【修正】処理経過の可視化 (st.status)
                 with st.status("🤖 AIエージェントが分析中...", expanded=True) as status:
                     ai = TemplateRecommenderAI()
-                    # recommend内部で st.write を呼ぶため、status内で実行
                     recommendations = ai.recommend(devices_summary)
                     
                     st.write("マッピングルールを更新しています...")
@@ -553,58 +513,78 @@ def main():
         else:
             st.info("現在、固有のマッピングルールはありません")
 
-    # --- 【修正】閾値と監視間隔の設定UI ---
+    # --- 【改修】閾値と監視間隔の設定UI (Zabbixライクなテーブル) ---
     st.subheader("🛠️ 監視ルール・閾値の設定")
     
     with st.container(border=True):
-        col_param1, col_param2, col_param3 = st.columns(3)
-        with col_param1:
+        c1, c2, c3 = st.columns(3)
+        with c1:
             ping_type = st.radio("Ping監視タイプ", ["simple", "loss"], 
                                format_func=lambda x: "死活監視 (0/1)" if x == "simple" else "品質監視 (Loss %)")
-        with col_param2:
+        with c2:
             monitor_interval = st.slider("基本監視間隔 (秒)", 30, 300, 60, 30)
-        with col_param3:
+        with c3:
             create_action = st.toggle("標準通知設定を作成", value=True)
 
         st.divider()
-        st.markdown("##### トリガー閾値カスタマイズ")
-        
-        # 閾値を持つルールを抽出して編集可能にする
-        threshold_rules = [r for r in trigger_rules if r.get("threshold_macro")]
-        if not threshold_rules:
-            st.info("カスタマイズ可能な閾値定義がありません。")
-        else:
-            # 3列で表示
-            cols = st.columns(3)
-            updated_rules = trigger_rules.copy()
-            is_changed = False
-            
-            for i, rule in enumerate(threshold_rules):
-                col = cols[i % 3]
-                current_val = rule.get("default_value", "")
-                unit = rule.get("unit", "")
-                
-                new_val = col.text_input(
-                    f"{rule['name']} ({unit})",
-                    value=current_val,
-                    key=f"thresh_{rule['id']}",
-                    help=f"マクロ: {rule['threshold_macro']}"
-                )
-                
-                if new_val != current_val:
-                    for r in updated_rules:
-                        if r["id"] == rule["id"]:
-                            r["default_value"] = new_val
+        st.markdown("##### ⚡ トリガー閾値 (マクロ設定)")
+        st.caption("JSONで定義されたすべての閾値マクロを編集できます。Zabbixの「Macros」タブと同様の操作感で設定してください。")
+
+        # 閾値を持つルールを抽出
+        df_triggers = pd.DataFrame([
+            {
+                "Trigger Name": r["name"],
+                "Macro": r.get("threshold_macro", ""),
+                "Value": r.get("default_value", ""),
+                "Unit": r.get("unit", ""),
+                "_id": r["id"] # 内部ID
+            }
+            for r in trigger_rules if r.get("threshold_macro")
+        ])
+
+        if not df_triggers.empty:
+            # DataEditorで編集可能にする
+            edited_df = st.data_editor(
+                df_triggers,
+                column_config={
+                    "Trigger Name": st.column_config.TextColumn("トリガー名 (説明)", disabled=True, width="medium"),
+                    "Macro": st.column_config.TextColumn("マクロ名", disabled=True, width="small"),
+                    "Value": st.column_config.TextColumn("設定値 (閾値)", help="変更して保存を押してください", required=True),
+                    "Unit": st.column_config.TextColumn("単位", disabled=True, width="small"),
+                    "_id": None # 非表示
+                },
+                hide_index=True,
+                use_container_width=True,
+                num_rows="fixed"
+            )
+
+            # 保存ボタン
+            if st.button("💾 閾値を保存して再計算", type="primary"):
+                # 変更を元のリストに反映
+                is_changed = False
+                for index, row in edited_df.iterrows():
+                    rule_id = row["_id"]
+                    new_val = row["Value"]
+                    
+                    # 元のルールを探して更新
+                    for rule in trigger_rules:
+                        if rule["id"] == rule_id and rule.get("default_value") != new_val:
+                            rule["default_value"] = new_val
                             is_changed = True
-            
-            if is_changed:
-                if st.button("閾値を保存して再計算", type="primary"):
-                    save_trigger_rules(updated_rules)
+                
+                if is_changed:
+                    save_trigger_rules(trigger_rules)
+                    st.success("閾値を更新しました！")
+                    time.sleep(1)
                     st.rerun()
+                else:
+                    st.info("変更はありませんでした。")
+        else:
+            st.info("カスタマイズ可能な閾値マクロはありません。")
 
     # 設定生成
     options = {"ping_type": ping_type, "interval": monitor_interval, "create_action": create_action}
-    config = generate_zabbix_config(full_data, options, trigger_rules, template_mapping)
+    config = generate_zabbix_config(data, options, trigger_rules, template_mapping)
     
     st.subheader("1. 設定内容の確認")
     
@@ -635,7 +615,7 @@ def main():
         st.dataframe(pd.DataFrame(df_hosts), use_container_width=True)
 
     with tab_group:
-        st.caption(f"※ 拠点名({full_data.get('site_name','Unknown')})/機器タイプ の階層構造")
+        st.caption(f"※ 拠点名({data.get('site_name','Unknown')})/機器タイプ の階層構造")
         st.dataframe(pd.DataFrame(config["host_groups"]), use_container_width=True)
 
     with tab_dep:
