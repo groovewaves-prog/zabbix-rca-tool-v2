@@ -8,7 +8,7 @@ import json
 import os
 import requests
 import pandas as pd
-import time
+import time # sleepは削除したがモジュールは念のため残す
 from typing import Dict, List, Any
 
 # Google Generative AI ライブラリのインポート試行
@@ -29,7 +29,7 @@ st.set_page_config(
 # ==================== データディレクトリ ====================
 DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
 
-# ==================== デフォルト定義 ====================
+# ==================== デフォルト定義 (インターバル設定を追加) ====================
 DEFAULT_TRIGGER_RULES = [
     {
         "id": "ping_check",
@@ -39,7 +39,9 @@ DEFAULT_TRIGGER_RULES = [
         "condition_type": "always",
         "threshold_macro": "{$ICMP_RESPONSE_TIME_WARN}",
         "default_value": "0",
-        "unit": "status"
+        "unit": "status",
+        "interval_macro": "{$ICMP_PING_INTERVAL}",
+        "default_interval": "60"
     },
     {
         "id": "cpu_check",
@@ -49,7 +51,9 @@ DEFAULT_TRIGGER_RULES = [
         "condition_type": "always",
         "threshold_macro": "{$CPU.UTIL.CRIT}",
         "default_value": "90",
-        "unit": "%"
+        "unit": "%",
+        "interval_macro": "{$CPU_CHECK_INTERVAL}",
+        "default_interval": "300"
     },
     {
         "id": "psu_check",
@@ -61,7 +65,9 @@ DEFAULT_TRIGGER_RULES = [
         "value": 1,
         "threshold_macro": "{$PSU.STATUS.CRIT}",
         "default_value": "1",
-        "unit": "status"
+        "unit": "status",
+        "interval_macro": "{$PSU_CHECK_INTERVAL}",
+        "default_interval": "3600"
     },
     {
         "id": "lag_check",
@@ -73,7 +79,9 @@ DEFAULT_TRIGGER_RULES = [
         "value": "LAG",
         "threshold_macro": None,
         "default_value": None,
-        "unit": ""
+        "unit": "",
+        "interval_macro": "{$LAG_CHECK_INTERVAL}",
+        "default_interval": "60"
     }
 ]
 
@@ -90,7 +98,6 @@ DEFAULT_TEMPLATE_MAPPING = {
 
 # ==================== データI/O関数 ====================
 def load_full_topology_data():
-    """トポロジーファイル全体を読み込む"""
     path = os.path.join(DATA_DIR, "topology.json")
     if os.path.exists(path):
         with open(path, "r", encoding="utf-8") as f:
@@ -118,7 +125,7 @@ def save_json_config(filename, data):
 def save_trigger_rules(rules):
     save_json_config("trigger_rules.json", rules)
 
-# ==================== AIエージェント ====================
+# ==================== AIエージェント (Gemma 3 / No Wait) ====================
 class TemplateRecommenderAI:
     def __init__(self):
         self.api_key = st.secrets.get("GOOGLE_API_KEY") or os.getenv("GOOGLE_API_KEY")
@@ -139,14 +146,13 @@ class TemplateRecommenderAI:
     def recommend(self, raw_devices_summary: List[Dict]) -> List[Dict]:
         sanitized_devices = self.sanitize_device_data(raw_devices_summary)
         
-        st.write("🔍 トポロジーデータからデバイス情報を抽出しています...")
-        time.sleep(0.5) 
-        st.write(f"📋 対象デバイス: {len(sanitized_devices)} 件のユニークなモデルを検出しました。")
+        # 処理状況の表示（ウェイトなし）
+        st.write(f"🔍 分析対象: {len(sanitized_devices)} デバイス")
         
         # Google Gemini API
         if self.api_key and HAS_GEMINI:
             try:
-                st.write("🤖 AIモデル (Gemma 3) に問い合わせを実行中...")
+                st.write("🤖 AI (Gemma 3) に問い合わせ中...")
                 genai.configure(api_key=self.api_key)
                 model = genai.GenerativeModel('gemma-3-12b-it')
                 
@@ -170,28 +176,23 @@ class TemplateRecommenderAI:
                 elif "```" in content:
                     content = content.split("```")[0]
                 
-                recommendations = json.loads(content.strip())
-                st.write("✅ AIからの回答を受信しました。")
-                return recommendations
+                return json.loads(content.strip())
 
             except Exception as e:
                 st.error(f"AI API Error: {e}")
-                st.warning("AI通信に失敗しました。モックロジックに切り替えます。")
+                st.warning("AI通信に失敗しました。モックロジックを使用します。")
         
-        # Mock Logic
-        time.sleep(1.0)
+        # Mock Logic (Wait無し)
         st.write("🧠 知識ベースと照合中 (Mock)...")
-        time.sleep(0.5)
-        
         recommendations = []
         for dev in sanitized_devices:
             vendor = dev['vendor'].lower()
             dtype = dev['type'].upper()
             template = "Template Module ICMP Ping"
             if "cisco" in vendor and dtype == "SWITCH": template = "Template Net Cisco IOS SNMP"
+            # ... (簡易ロジック) ...
             recommendations.append({"vendor": dev['vendor'], "type": dev['type'], "template": template})
         
-        st.write("✅ テンプレートのマッピングが完了しました。")
         return recommendations
 
 # ==================== Zabbix API Client ====================
@@ -220,7 +221,6 @@ class MockZabbixAPI:
         self.url = "http://mock-zabbix/api"
         self.id_counter = 1
     def call(self, method: str, params: Any = None):
-        time.sleep(0.1)
         if method == "apiinfo.version": return "6.4.0 (Mock)"
         elif method == "hostgroup.get": return []
         elif method == "hostgroup.create": return {"groupids": ["100"]}
@@ -276,19 +276,23 @@ def generate_zabbix_config(full_data: Dict, options: Dict, trigger_rules: List, 
             "details": {"version": 2, "community": "public"}
         }]
 
-        macros = [{"macro": "{$UPDATE_INTERVAL}", "value": f"{options['interval']}s"}]
-        
+        macros = []
+        # モジュール数マクロ
         if hw.get("psu_count"): macros.append({"macro": "{$EXPECTED_PSU_COUNT}", "value": str(hw["psu_count"])})
         if hw.get("fan_count"): macros.append({"macro": "{$EXPECTED_FAN_COUNT}", "value": str(hw["fan_count"])})
-        
         for mod_name in module_master:
             count = hw.get("custom_modules", {}).get(mod_name, 0)
             safe_name = mod_name.upper().replace("-", "_").replace(" ", "_").replace("+", "PLUS")
             macros.append({"macro": f"{{$EXPECTED_{safe_name}_COUNT}}", "value": str(count)})
 
+        # トリガールール（閾値 + 間隔）
         for rule in trigger_rules:
+            # 閾値マクロ
             if rule.get("threshold_macro") and rule.get("default_value") is not None:
                 macros.append({"macro": rule["threshold_macro"], "value": str(rule["default_value"])})
+            # 間隔マクロ (テンプレート側でこのマクロを使用している前提)
+            if rule.get("interval_macro") and rule.get("default_interval") is not None:
+                macros.append({"macro": rule["interval_macro"], "value": f"{rule['default_interval']}s"})
 
         tags = [
             {"tag": "Layer", "value": str(dev_data.get("layer", 0))},
@@ -462,7 +466,6 @@ def main():
         st.warning("⚠️ データがありません。ファイルをアップロードするかトポロジービルダーを実行してください。")
         return
 
-    # 設定ロード
     trigger_rules = load_json_config("trigger_rules.json", DEFAULT_TRIGGER_RULES)
     template_mapping = load_json_config("template_mapping.json", DEFAULT_TEMPLATE_MAPPING)
 
@@ -470,7 +473,6 @@ def main():
     with st.expander("🤖 テンプレート自動マッピング (AI)", expanded=True):
         st.write("トポロジー内のデバイス情報（ベンダー、モデル）を分析し、最適なZabbixテンプレートを自動割り当てします。")
         
-        # ボタン名称変更
         if st.button("✨ AIで推奨テンプレートを生成・適用", type="primary"):
             devices_summary = []
             seen = set()
@@ -507,83 +509,83 @@ def main():
                 st.success(f"✅ {added_count} 件の新しいマッピングルールを追加しました！")
                 st.rerun()
 
-        if template_mapping["mappings"]:
+        # 【修正】テーブルはデータがある場合のみ表示 (AI未実施時の混乱防止)
+        if template_mapping.get("mappings"):
             st.caption("現在の適用ルール:")
             st.dataframe(pd.DataFrame(template_mapping["mappings"]), use_container_width=True)
-        else:
-            st.info("現在、固有のマッピングルールはありません")
 
-    # --- 【改修】閾値と監視間隔の設定UI (Zabbixライクなテーブル) ---
+    # --- 【修正】監視ルール・閾値の設定 (不要項目削除・インターバル追加) ---
     st.subheader("🛠️ 監視ルール・閾値の設定")
     
     with st.container(border=True):
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            ping_type = st.radio("Ping監視タイプ", ["simple", "loss"], 
-                               format_func=lambda x: "死活監視 (0/1)" if x == "simple" else "品質監視 (Loss %)")
-        with c2:
-            monitor_interval = st.slider("基本監視間隔 (秒)", 30, 300, 60, 30)
-        with c3:
-            create_action = st.toggle("標準通知設定を作成", value=True)
-
+        # Ping監視タイプ、基本監視間隔のスライダーは削除しました
+        create_action = st.toggle("標準通知設定を作成", value=True)
+        
         st.divider()
-        st.markdown("##### ⚡ トリガー閾値 (マクロ設定)")
-        st.caption("JSONで定義されたすべての閾値マクロを編集できます。Zabbixの「Macros」タブと同様の操作感で設定してください。")
+        st.markdown("##### ⚡ トリガー設定 (閾値 / 監視間隔)")
+        st.caption("各監視項目の閾値および監視間隔を編集できます。設定内容は「保存」後に「Zabbix設定ファイル」に反映されます。")
 
-        # 閾値を持つルールを抽出
-        df_triggers = pd.DataFrame([
-            {
-                "Trigger Name": r["name"],
-                "Macro": r.get("threshold_macro", ""),
-                "Value": r.get("default_value", ""),
-                "Unit": r.get("unit", ""),
-                "_id": r["id"] # 内部ID
-            }
-            for r in trigger_rules if r.get("threshold_macro")
-        ])
+        # 表示用データフレーム作成
+        rows = []
+        for r in trigger_rules:
+            if r.get("threshold_macro") or r.get("interval_macro"):
+                rows.append({
+                    "Trigger Name": r["name"],
+                    "Macro (Threshold)": r.get("threshold_macro", "-"),
+                    "Threshold Value": r.get("default_value", "-"),
+                    "Unit": r.get("unit", ""),
+                    "Macro (Interval)": r.get("interval_macro", "-"),
+                    "Interval (sec)": r.get("default_interval", "-"),
+                    "_id": r["id"]
+                })
+        
+        df_triggers = pd.DataFrame(rows)
 
         if not df_triggers.empty:
-            # DataEditorで編集可能にする
             edited_df = st.data_editor(
                 df_triggers,
                 column_config={
-                    "Trigger Name": st.column_config.TextColumn("トリガー名 (説明)", disabled=True, width="medium"),
-                    "Macro": st.column_config.TextColumn("マクロ名", disabled=True, width="small"),
-                    "Value": st.column_config.TextColumn("設定値 (閾値)", help="変更して保存を押してください", required=True),
+                    "Trigger Name": st.column_config.TextColumn("監視項目名", disabled=True, width="medium"),
+                    "Macro (Threshold)": st.column_config.TextColumn("閾値マクロ", disabled=True, width="small"),
+                    "Threshold Value": st.column_config.TextColumn("閾値", required=True),
                     "Unit": st.column_config.TextColumn("単位", disabled=True, width="small"),
-                    "_id": None # 非表示
+                    "Macro (Interval)": st.column_config.TextColumn("間隔マクロ", disabled=True, width="small"),
+                    "Interval (sec)": st.column_config.TextColumn("監視間隔(秒)", required=True),
+                    "_id": None 
                 },
                 hide_index=True,
                 use_container_width=True,
                 num_rows="fixed"
             )
 
-            # 保存ボタン
-            if st.button("💾 閾値を保存して再計算", type="primary"):
-                # 変更を元のリストに反映
+            # ボタン名称変更
+            if st.button("💾 設定を保存して反映", type="primary"):
                 is_changed = False
                 for index, row in edited_df.iterrows():
                     rule_id = row["_id"]
-                    new_val = row["Value"]
+                    new_thresh = row["Threshold Value"]
+                    new_int = row["Interval (sec)"]
                     
-                    # 元のルールを探して更新
                     for rule in trigger_rules:
-                        if rule["id"] == rule_id and rule.get("default_value") != new_val:
-                            rule["default_value"] = new_val
-                            is_changed = True
+                        if rule["id"] == rule_id:
+                            if rule.get("default_value") != new_thresh:
+                                rule["default_value"] = new_thresh
+                                is_changed = True
+                            if rule.get("default_interval") != new_int:
+                                rule["default_interval"] = new_int
+                                is_changed = True
                 
                 if is_changed:
                     save_trigger_rules(trigger_rules)
-                    st.success("閾値を更新しました！")
-                    time.sleep(1)
+                    st.success("設定を更新しました！")
                     st.rerun()
                 else:
                     st.info("変更はありませんでした。")
         else:
-            st.info("カスタマイズ可能な閾値マクロはありません。")
+            st.info("設定可能なルールがありません。")
 
     # 設定生成
-    options = {"ping_type": ping_type, "interval": monitor_interval, "create_action": create_action}
+    options = {"create_action": create_action, "interval": 60} # intervalダミー
     config = generate_zabbix_config(data, options, trigger_rules, template_mapping)
     
     st.subheader("1. 設定内容の確認")
