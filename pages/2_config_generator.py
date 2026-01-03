@@ -8,6 +8,7 @@ import json
 import os
 import requests
 import pandas as pd
+import time
 from typing import Dict, List, Any
 
 # Google Generative AI
@@ -43,7 +44,6 @@ DEFAULT_TEMPLATE_MAPPING = {
 }
 
 # 2. グローバルマクロ (Thresholds & Intervals)
-# Zabbixのテンプレートが使用する標準的なマクロ名を定義
 DEFAULT_MACROS = [
     {"macro": "{$ICMP_RESPONSE_TIME_WARN}", "value": "0.15", "desc": "Ping応答時間警告(秒)"},
     {"macro": "{$ICMP_PING_INTERVAL}", "value": "60", "desc": "Ping監視間隔(秒)"},
@@ -166,6 +166,7 @@ class ZabbixAPI:
 class MockZabbixAPI:
     def __init__(self): pass
     def call(self, method: str, params: Any = None):
+        time.sleep(0.1)
         if method == "apiinfo.version": return "6.4.0 (Mock)"
         return {"result": []}
     def check_connection(self): return "6.4.0 (Mock)"
@@ -189,7 +190,7 @@ def generate_zabbix_config(full_data: Dict, macro_config: List[Dict], template_m
     for d in topology.values(): groups.add(f"{site_name}/{d.get('type', 'Other')}")
     config["host_groups"] = [{"name": g} for g in sorted(groups)]
 
-    # 2. Hosts (Items/Triggers are defined in Templates, controlled by Macros)
+    # 2. Hosts
     for dev_id, dev_data in topology.items():
         meta = dev_data.get("metadata", {})
         hw = meta.get("hw_inventory", {})
@@ -201,17 +202,11 @@ def generate_zabbix_config(full_data: Dict, macro_config: List[Dict], template_m
                 tpl_name = rule["template"]
                 break
         
-        # ホストマクロ (グローバルマクロ + 個別インベントリ)
+        # ホストマクロ
         host_macros = []
-        
-        # A. インベントリ由来のマクロ (個体差)
         if hw.get("psu_count"): host_macros.append({"macro": "{$EXPECTED_PSU_COUNT}", "value": str(hw["psu_count"])})
         if hw.get("fan_count"): host_macros.append({"macro": "{$EXPECTED_FAN_COUNT}", "value": str(hw["fan_count"])})
         
-        # B. 共通ポリシーマクロ (ユーザー設定)
-        # Zabbixではグローバルマクロで設定するのが一般的だが、
-        # ここでは確実に適用するためホストマクロとして展開するか、エクスポート時にGlobalMacroとして出すか。
-        # 簡易化のためホストマクロに結合します。
         for m in macro_config:
             host_macros.append({"macro": m["macro"], "value": m["value"]})
 
@@ -231,17 +226,17 @@ def generate_zabbix_config(full_data: Dict, macro_config: List[Dict], template_m
         }
         config["hosts"].append(host_obj)
 
-    # 3. Media Types (通知手段)
+    # 3. Media Types
     config["media_types"].append({
         "name": "Email (HTML)",
-        "type": 0, # Email
+        "type": 0,
         "smtp_server": media_config.get("smtp_server"),
         "smtp_helo": media_config.get("smtp_helo"),
         "smtp_email": media_config.get("smtp_email"),
-        "content_type": 1 # HTML
+        "content_type": 1 
     })
 
-    # 4. User Groups & Users
+    # 4. Users
     config["user_groups"].append({"name": "Zabbix Administrators", "users_status": 0})
     config["users"].append({
         "alias": "Admin", "name": "Zabbix", "surname": "Administrator",
@@ -249,23 +244,19 @@ def generate_zabbix_config(full_data: Dict, macro_config: List[Dict], template_m
         "medias": [{"mediatype": {"name": "Email (HTML)"}, "sendto": ["admin@example.com"]}]
     })
 
-    # 5. Actions (通知ロジック)
-    # "Average以上でAdminグループへメール送信"
+    # 5. Actions
     severity_map = {"Information": 1, "Warning": 2, "Average": 3, "High": 4, "Disaster": 5}
     sev_val = severity_map.get(media_config.get("alert_severity"), 3)
     
     config["actions"].append({
         "name": "Report problems to Admins",
-        "eventsource": 0, # Trigger
-        "status": 0, # Enabled
+        "eventsource": 0, "status": 0, 
         "filter": {
-            "evaltype": 0, # And/Or
-            "conditions": [
-                {"conditiontype": 4, "operator": 5, "value": str(sev_val)} # Severity >= X
-            ]
+            "evaltype": 0,
+            "conditions": [{"conditiontype": 4, "operator": 5, "value": str(sev_val)}]
         },
         "operations": [{
-            "operationtype": 0, # Send message
+            "operationtype": 0,
             "opmessage_grp": [{"name": "Zabbix Administrators"}],
             "opmessage": {"mediatype": {"name": "Email (HTML)"}}
         }]
@@ -275,14 +266,56 @@ def generate_zabbix_config(full_data: Dict, macro_config: List[Dict], template_m
     for c in connections:
         if c["type"] == "uplink":
             config["dependencies"].append({
-                "host": c["from"], "depends_on": c["to"],
-                "desc": "Uplink Dependency"
+                "host": c["from"], "depends_on": c["to"], "desc": "Uplink"
             })
 
     return config
 
+# ==================== API投入ロジック ====================
+def push_config_to_zabbix(api: Any, config: Dict):
+    logs = []
+    # 簡易実装: ホストグループとホストのみ (エラーハンドリング簡略)
+    try:
+        # Group
+        existing = {g['name']: g['groupid'] for g in api.call("hostgroup.get", {"output": ["name"]})}
+        for g in config["host_groups"]:
+            if g["name"] not in existing:
+                res = api.call("hostgroup.create", {"name": g["name"]})
+                existing[g["name"]] = res["groupids"][0]
+                logs.append(f"✅ Group created: {g['name']}")
+        
+        # Host
+        for h in config["hosts"]:
+            # resolve IDs
+            g_ids = [{"groupid": existing[g["name"]]} for g in h["groups"] if g["name"] in existing]
+            # template ID resolving (省略 - MockではダミーID)
+            t_ids = [{"templateid": "10001"}] 
+            
+            h_payload = {**h, "groups": g_ids, "templates": t_ids}
+            
+            # check exist
+            host_exist = api.call("host.get", {"filter": {"host": h["host"]}})
+            if host_exist:
+                h_payload["hostid"] = host_exist[0]["hostid"]
+                del h_payload["interfaces"] # update時のIF処理は複雑なため省略
+                api.call("host.update", h_payload)
+                logs.append(f"🔄 Host updated: {h['host']}")
+            else:
+                api.call("host.create", h_payload)
+                logs.append(f"✨ Host created: {h['host']}")
+                
+    except Exception as e:
+        raise e
+    return logs
+
 # ==================== UIメイン処理 ====================
 def main():
+    # 【重要】セッション状態の初期化 (エラー回避のため最優先で実行)
+    if "zabbix_connected" not in st.session_state:
+        st.session_state.zabbix_connected = False
+    if "is_mock" not in st.session_state:
+        st.session_state.is_mock = False
+
     with st.sidebar:
         st.header("📂 データソース")
         uploaded_file = st.file_uploader("設定ファイル (JSON)", type=["json"])
@@ -294,7 +327,21 @@ def main():
         zabbix_token = st.text_input("Token", type="password", disabled=use_mock)
         
         if st.button("接続テスト", use_container_width=True):
-            st.success("OK") if use_mock else st.error("設定してください")
+            try:
+                if use_mock:
+                    api = MockZabbixAPI()
+                    st.session_state.is_mock = True
+                else:
+                    if not zabbix_url: raise Exception("URLを入力してください")
+                    api = ZabbixAPI(zabbix_url, zabbix_token)
+                    st.session_state.is_mock = False
+                
+                ver = api.check_connection()
+                st.session_state.zabbix_connected = True
+                st.success(f"接続OK: {ver}")
+            except Exception as e:
+                st.session_state.zabbix_connected = False
+                st.error(f"エラー: {e}")
 
     col1, col2 = st.columns([3, 1])
     with col1: st.title("⚙️ 監視設定生成")
@@ -317,7 +364,7 @@ def main():
     template_mapping = load_json_config("template_mapping.json", DEFAULT_TEMPLATE_MAPPING)
     media_config = load_json_config("zabbix_media.json", DEFAULT_MEDIA_CONFIG)
 
-    # === Tab構成: Zabbixの設定フローに合わせる ===
+    # === Tab構成 ===
     tab1, tab2, tab3 = st.tabs([
         "1. ホスト & テンプレート (Data Collection)", 
         "2. マクロ & 閾値 (Thresholds)", 
