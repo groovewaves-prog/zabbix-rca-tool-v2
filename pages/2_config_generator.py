@@ -1,5 +1,5 @@
 """
-Zabbix RCA Tool - 監視設定生成 & API連携 (AI Assisted)
+Zabbix RCA Tool - 監視設定生成 & API連携 (AI Assisted - Gemma 3)
 トポロジーからZabbix設定を自動生成し、API経由で適用する
 """
 
@@ -10,6 +10,14 @@ import requests
 import pandas as pd
 import time
 from typing import Dict, List, Any
+
+# Google Generative AI ライブラリのインポート試行
+# Gemma 3 も Google AI Studio (genai) 経由で利用可能と仮定
+try:
+    import google.generativeai as genai
+    HAS_GEMINI = True
+except ImportError:
+    HAS_GEMINI = False
 
 # ==================== ページ設定 ====================
 st.set_page_config(
@@ -70,7 +78,6 @@ DEFAULT_TRIGGER_RULES = [
     }
 ]
 
-# デフォルトのマッピング（AIがない場合のフォールバック用）
 DEFAULT_TEMPLATE_MAPPING = {
     "mappings": [],
     "defaults": {
@@ -111,66 +118,111 @@ def save_json_config(filename, data):
 def save_trigger_rules(rules):
     save_json_config("trigger_rules.json", rules)
 
-# ==================== AIエージェント (テンプレート推奨機能) ====================
+# ==================== AIエージェント (Gemma 3対応 & サニタイズ) ====================
 class TemplateRecommenderAI:
-    def __init__(self, api_key: str = None):
-        self.api_key = api_key
+    def __init__(self):
+        # APIキーの取得
+        self.api_key = st.secrets.get("GOOGLE_API_KEY") or os.getenv("GOOGLE_API_KEY")
 
-    def recommend(self, devices_summary: List[Dict]) -> List[Dict]:
+    def sanitize_device_data(self, devices: List[Dict]) -> List[Dict]:
+        """
+        【セキュリティ対策】
+        AIに送信するデータを「テンプレート判定に必要な情報」だけに絞り込む（サニタイズ）。
+        """
+        sanitized_list = []
+        for d in devices:
+            clean_data = {
+                "vendor": d.get("vendor", "Unknown"),
+                "type": d.get("type", "Unknown"),
+                "model": d.get("model", "")
+            }
+            if not clean_data["model"]:
+                clean_data["model"] = "Unknown"
+                
+            sanitized_list.append(clean_data)
+        return sanitized_list
+
+    def recommend(self, raw_devices_summary: List[Dict]) -> List[Dict]:
         """
         デバイスリストを受け取り、最適なZabbixテンプレート名を推論して返す。
-        APIキーがあればOpenAI等を呼び出す（ここでは簡易実装としてモックロジックを強化）
         """
+        # 1. データのサニタイズ実行
+        sanitized_devices = self.sanitize_device_data(raw_devices_summary)
         
-        # 本来ならここで OpenAI API を叩く
-        # prompt = f"""
-        # 以下のネットワーク機器リストに対し、Zabbix 6.0/7.0 標準のSNMPテンプレートで
-        # 最も適切と思われるテンプレート名を推論し、JSON形式で回答してください。
-        # リスト: {json.dumps(devices_summary)}
-        # """
+        st.write("🤖 AIエージェント(Gemma 3)がデバイス情報を分析中...")
         
-        st.write("🤖 AIエージェントがデバイス情報を分析中...")
-        time.sleep(1.5) # 思考時間を演出
+        # 2. Google AI API (Gemma 3) 呼び出し
+        if self.api_key and HAS_GEMINI:
+            try:
+                genai.configure(api_key=self.api_key)
+                
+                # 【修正】ユーザー指定の Gemma 3 モデルを使用
+                # 2026年時点での利用を想定
+                model = genai.GenerativeModel('gemma-3-12b-it')
+                
+                prompt = f"""
+                You are a Zabbix configuration expert.
+                Analyze the following list of network devices (JSON format) and identify the most appropriate standard SNMP template included in Zabbix 6.0/7.0 for each device.
+
+                # Constraints
+                - Output MUST be a valid JSON array only. Do not include markdown formatting (like ```json).
+                - Do not add any explanation or conversational text.
+                - Format each element as: {{"vendor": "...", "type": "...", "template": "..."}}
+                - If no specific template is found, use "Template Module ICMP Ping".
+
+                # Device List
+                {json.dumps(sanitized_devices, ensure_ascii=False)}
+                """
+                
+                response = model.generate_content(prompt)
+                
+                # レスポンスの解析 (JSON部分の抽出)
+                content = response.text
+                
+                # Markdownのコードブロック除去 (GemmaがMarkdownを含める可能性があるため)
+                if "```json" in content:
+                    content = content.split("```json")[1].split("```")[0]
+                elif "```" in content:
+                    content = content.split("```")[0]
+                
+                # クリーニング (前後の空白除去)
+                content = content.strip()
+                
+                recommendations = json.loads(content)
+                return recommendations
+
+            except Exception as e:
+                st.error(f"AI API Error: {e}")
+                st.warning("AI通信に失敗しました。モックロジックに切り替えます。")
+        else:
+            if not HAS_GEMINI:
+                st.warning("google-generativeai ライブラリがインストールされていません。")
+            elif not self.api_key:
+                st.warning("GOOGLE_API_KEY が設定されていません。")
         
+        # 3. モックロジック (フォールバック)
+        time.sleep(1.0) 
         recommendations = []
-        
-        # AIの推論ロジック（モック）
-        # 実際にはLLMが膨大な知識からここを埋めてくれる
-        for dev in devices_summary:
+        for dev in sanitized_devices:
             vendor = dev['vendor'].lower()
             dtype = dev['type'].upper()
             model = dev['model'].lower()
             
-            template = "Template Module ICMP Ping" # Fallback
+            template = "Template Module ICMP Ping" 
             
             if "cisco" in vendor:
                 if "catalyst" in model or "c9" in model or dtype == "SWITCH":
-                    template = "Template Net Cisco IOS SNMP" # Cisco Switch
+                    template = "Template Net Cisco IOS SNMP"
                 elif "nexus" in model:
                     template = "Template Net Cisco Nexus SNMP"
                 else:
                     template = "Template Net Cisco IOS SNMP"
-            
             elif "juniper" in vendor:
                 template = "Template Net Juniper SNMP"
-                if "srx" in model:
-                    template = "Template Net Juniper SRX SNMP"
-            
             elif "fortinet" in vendor:
                 template = "Template Net Fortinet FortiGate SNMP"
-            
-            elif "palo alto" in vendor:
-                template = "Template Net Palo Alto SNMP"
-                
-            elif "f5" in vendor:
-                template = "Template Net F5 Big-IP SNMP"
-                
-            elif "arista" in vendor:
-                template = "Template Net Arista EOS SNMP"
-                
             elif "linux" in vendor or dtype == "SERVER":
                 template = "Template OS Linux by Zabbix agent"
-                
             elif "windows" in vendor:
                 template = "Template OS Windows by Zabbix agent"
 
@@ -240,12 +292,10 @@ class MockZabbixAPI:
 # ==================== 設定生成ロジック ====================
 def determine_template(vendor, device_type, mapping_data):
     """マッピングデータからテンプレートを決定"""
-    # 1. 完全一致 (Vendor + Type) を検索
     for rule in mapping_data.get("mappings", []):
         if rule.get("vendor") == vendor and rule.get("type") == device_type:
             return rule["template"]
     
-    # 2. デフォルト設定 (Typeのみ) で検索
     defaults = mapping_data.get("defaults", {})
     if device_type in defaults:
         return defaults[device_type]
@@ -290,7 +340,6 @@ def generate_zabbix_config(data: Dict, options: Dict, trigger_rules: List, templ
         
         host_groups = [{"name": location}, {"name": f"{location}/{dev_type}"}]
         
-        # テンプレート決定 (AI生成または手動定義のマッピングを使用)
         template_name = determine_template(vendor, dev_type, template_mapping)
         
         interfaces = [{
@@ -298,7 +347,6 @@ def generate_zabbix_config(data: Dict, options: Dict, trigger_rules: List, templ
             "details": {"version": 2, "community": "public"}
         }]
 
-        # マクロ
         macros = [{"macro": "{$UPDATE_INTERVAL}", "value": f"{options['interval']}s"}]
         
         if hw.get("psu_count"): macros.append({"macro": "{$EXPECTED_PSU_COUNT}", "value": str(hw["psu_count"])})
@@ -313,7 +361,6 @@ def generate_zabbix_config(data: Dict, options: Dict, trigger_rules: List, templ
             if rule.get("threshold_macro") and rule.get("default_value") is not None:
                 macros.append({"macro": rule["threshold_macro"], "value": str(rule["default_value"])})
 
-        # タグ
         tags = [
             {"tag": "Layer", "value": str(dev_data.get("layer", 0))},
             {"tag": "Vendor", "value": vendor},
@@ -466,20 +513,15 @@ def main():
                 st.session_state.zabbix_connected = False
                 st.error(f"エラー: {e}")
         
-        st.divider()
-        st.markdown("### 🤖 AI設定")
-        openai_key = st.text_input("OpenAI API Key (Optional)", type="password", help="入力がない場合、内部ロジックで推論します")
-
     col1, col2 = st.columns([3, 1])
     with col1:
-        st.title("⚙️ 監視設定生成 (AI Assisted)")
+        st.title("⚙️ 監視設定生成 (AI Assisted - Gemma 3)")
     with col2:
         if st.button("🏠 ホーム", use_container_width=True):
             st.switch_page("Home.py")
     
     st.divider()
 
-    # データロード
     data = None
     if uploaded_file:
         data = json.load(uploaded_file)
@@ -493,36 +535,32 @@ def main():
         st.warning("⚠️ データがありません。ファイルをアップロードするかトポロジービルダーを実行してください。")
         return
 
-    # 設定ロード
     trigger_rules = load_json_config("trigger_rules.json", DEFAULT_TRIGGER_RULES)
     template_mapping = load_json_config("template_mapping.json", DEFAULT_TEMPLATE_MAPPING)
 
-    # --- AIテンプレートレコメンド機能 ---
     with st.expander("🤖 テンプレート自動マッピング (AI)", expanded=True):
         st.write("トポロジー内のデバイス情報（ベンダー、モデル）を分析し、最適なZabbixテンプレートを自動割り当てします。")
         
-        if st.button("✨ AIで推奨テンプレートを生成・適用", type="primary"):
-            # ユニークなデバイスタイプを抽出
+        if st.button("✨ AI (Gemma 3) で推奨テンプレートを生成・適用", type="primary"):
+            # 1. デバイス情報の収集
             devices_summary = []
             seen = set()
             for d in data["topology"].values():
                 meta = d.get("metadata", {})
                 key = (meta.get("vendor"), d.get("type"), meta.get("model"))
-                if key not in seen and key[0]: # Vendorがあるもののみ
+                if key not in seen and key[0]:
                     seen.add(key)
                     devices_summary.append({"vendor": key[0], "type": key[1], "model": key[2]})
             
             if not devices_summary:
-                st.warning("有効なベンダー情報を持つデバイスが見つかりませんでした。トポロジービルダーでベンダーを入力してください。")
+                st.warning("有効なベンダー情報を持つデバイスが見つかりませんでした。")
             else:
-                # AI実行
-                ai = TemplateRecommenderAI(api_key=openai_key)
+                # 2. AIクラスの初期化と推論実行 (Gemma 3)
+                ai = TemplateRecommenderAI()
                 recommendations = ai.recommend(devices_summary)
                 
-                # マッピング更新
+                # 3. マッピングの更新
                 current_mappings = template_mapping.get("mappings", [])
-                
-                # 重複を排除して追加
                 added_count = 0
                 for rec in recommendations:
                     exists = any(
@@ -538,14 +576,12 @@ def main():
                 st.success(f"✅ {added_count} 件の新しいマッピングルールを追加しました！")
                 st.rerun()
 
-        # 現在のマッピング表示
         if template_mapping["mappings"]:
             st.caption("現在の適用ルール:")
             st.dataframe(pd.DataFrame(template_mapping["mappings"]), use_container_width=True)
         else:
-            st.info("現在、固有のマッピングルールはありません（デフォルト設定が適用されます）")
+            st.info("現在、固有のマッピングルールはありません")
 
-    # 監視パラメータ設定
     with st.expander("🛠️ 監視パラメータ設定", expanded=False):
         c1, c2, c3 = st.columns(3)
         with c1:
@@ -555,11 +591,9 @@ def main():
         with c3:
             create_action = st.toggle("標準通知設定を作成", value=True)
 
-    # 設定生成
     options = {"ping_type": ping_type, "interval": monitor_interval, "create_action": create_action}
     config = generate_zabbix_config(data, options, trigger_rules, template_mapping)
     
-    # === 設定内容の可視化 ===
     st.subheader("1. 設定内容の確認")
     
     k1, k2, k3, k4 = st.columns(4)
@@ -599,7 +633,6 @@ def main():
 
     st.divider()
     
-    # === アクションエリア ===
     st.subheader("2. 実行")
     c_dl, c_push = st.columns(2)
     
@@ -619,6 +652,7 @@ def main():
             st.button("データなし", disabled=True, use_container_width=True)
         else:
             if st.button("🚀 Zabbixへ投入開始", type="primary", use_container_width=True):
+                
                 if st.session_state.is_mock:
                     api = MockZabbixAPI()
                 else:
