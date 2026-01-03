@@ -418,10 +418,7 @@ def render_sidebar():
             help="例: Tokyo-HQ, Osaka-Branch"
         )
         
-        st.divider()
-        st.subheader("🛠️ マスタ管理")
-        if st.button("Type / Vendor 管理", use_container_width=True):
-            manage_master_data_dialog()
+        # NOTE: マスタ管理ボタンは編集フォームの基本情報タブへ移動しました
 
 def render_add_device():
     with st.expander("➕ デバイス追加", expanded=len(st.session_state.devices) == 0):
@@ -434,7 +431,7 @@ def render_add_device():
                 st.session_state.devices[new_id] = {
                     "type": "SWITCH", 
                     "metadata": {
-                        "vendor": "", "model": "", "rack_info": "", # rack_infoに変更
+                        "vendor": "", "model": "", "rack_info": "", 
                         "hw_inventory": {"psu_count": 1, "fan_count": 0, "custom_modules": {}}
                     }
                 }
@@ -487,7 +484,7 @@ def render_device_list():
                 badges = []
                 if meta.get("vendor"): badges.append(meta["vendor"])
                 if meta.get("model"): badges.append(meta["model"])
-                # 詳細な設置場所 (旧Location)
+                # 詳細な設置場所
                 if meta.get("rack_info"): badges.append(f"📍{meta['rack_info']}")
                 if badges: st.caption(" | ".join(badges))
 
@@ -497,7 +494,14 @@ def render_device_list():
                     with st.form(key=f"form_{dev_id}"):
                         t1, t2, t3 = st.tabs(["基本情報", "HW/モジュール", "論理/NW"])
                         
+                        # --- Tab 1: 基本情報 (Type/Vendor管理ボタン追加) ---
                         with t1:
+                            # ヘッダーと管理ボタン
+                            tv_head, tv_btn = st.columns([3, 2])
+                            tv_head.markdown("##### デバイス種別・ベンダー")
+                            if tv_btn.form_submit_button("🛠️ Type/Vendor 管理"):
+                                manage_master_data_dialog()
+
                             r1c1, r1c2 = st.columns(2)
                             # Type: マスタから選択
                             curr_type = dev.get("type", "SWITCH")
@@ -518,6 +522,7 @@ def render_device_list():
                                                       value=meta.get("rack_info", meta.get("location", "")),
                                                       help="例: Server Room 1, Rack A-10")
 
+                        # --- Tab 2: HW/モジュール ---
                         with t2:
                             h1, h2 = st.columns(2)
                             new_psu = h1.number_input("PSU数", min_value=0, value=meta.get("hw_inventory", {}).get("psu_count", 1))
@@ -537,6 +542,7 @@ def render_device_list():
                                     val = cols[i%2].number_input(f"{mname} 数", min_value=0, value=curr_mods.get(mname, 0), key=f"mnum_{dev_id}_{mname}")
                                     if val > 0: new_mods[mname] = int(val)
 
+                        # --- Tab 3: 論理/NW ---
                         with t3:
                             st.markdown("##### 接続ごとの論理設定")
                             related = [(i,c) for i,c in enumerate(st.session_state.connections) if c['from']==dev_id or c['to']==dev_id]
@@ -552,18 +558,27 @@ def render_device_list():
                                     updated_conns[idx] = {"lag_enabled": islag, "vlans": ivlans}
 
                         st.divider()
-                        if st.form_submit_button("💾 保存", type="primary"):
-                            st.session_state.devices[dev_id]["type"] = new_type
-                            st.session_state.devices[dev_id]["metadata"].update({
-                                "vendor": new_vend,
-                                "model": new_model,
-                                "rack_info": new_rack, # 詳細位置
-                                "hw_inventory": {"psu_count": int(new_psu), "fan_count": int(new_fan), "custom_modules": new_mods}
-                            })
-                            for idx, cmeta in updated_conns.items():
-                                st.session_state.connections[idx]["metadata"] = cmeta
-                            st.session_state.editing_device = None
-                            st.rerun()
+                        
+                        # 保存・キャンセルボタン (横並び)
+                        c_save, c_cancel = st.columns([1, 1])
+                        with c_save:
+                            if st.form_submit_button("💾 保存", type="primary", use_container_width=True):
+                                st.session_state.devices[dev_id]["type"] = new_type
+                                st.session_state.devices[dev_id]["metadata"].update({
+                                    "vendor": new_vend,
+                                    "model": new_model,
+                                    "rack_info": new_rack, 
+                                    "hw_inventory": {"psu_count": int(new_psu), "fan_count": int(new_fan), "custom_modules": new_mods}
+                                })
+                                for idx, cmeta in updated_conns.items():
+                                    st.session_state.connections[idx]["metadata"] = cmeta
+                                st.session_state.editing_device = None
+                                st.rerun()
+                        
+                        with c_cancel:
+                            if st.form_submit_button("キャンセル", use_container_width=True):
+                                st.session_state.editing_device = None
+                                st.rerun()
 
 def render_data_io():
     st.divider()
@@ -588,10 +603,9 @@ def render_data_io():
         layers = calculate_layers()
         for did, ddata in st.session_state.devices.items():
             parents = [c["to"] for c in st.session_state.connections if c["from"] == did and c["type"] == "uplink"]
-            # 互換性のため location フィールドにも rack_info を入れる（ConfigGen側で location を詳細位置として使う場合のため）
-            # ただし ConfigGen 側も site_name を読むように対応済みなら不要だが、念のため。
+            # 互換性: location フィールドにも rack_info を入れる
             meta = ddata["metadata"].copy()
-            meta["location"] = meta.get("rack_info", "") # 旧フィールドへの互換
+            meta["location"] = meta.get("rack_info", "")
             
             export_data["topology"][did] = {
                 "type": ddata["type"],
@@ -625,7 +639,7 @@ def render_data_io():
                 new_devs = {}
                 for did, val in topo.items():
                     meta = val.get("metadata", {})
-                    # 旧データ(location) を新データ(rack_info) にマッピング
+                    # 旧データ互換
                     if "rack_info" not in meta and "location" in meta:
                         meta["rack_info"] = meta["location"]
                     
@@ -650,7 +664,7 @@ def render_data_io():
 # ==================== メイン ====================
 def main():
     init_session()
-    render_sidebar() # サイドバー描画
+    render_sidebar()
     
     st.title("🔧 トポロジービルダー")
     components.html(generate_visjs_html(), height=480)
