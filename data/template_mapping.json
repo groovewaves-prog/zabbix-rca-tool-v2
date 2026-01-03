@@ -1,0 +1,36 @@
+{
+  "mappings": [
+    {
+      "vendor": "Cisco",
+      "type": "SWITCH",
+      "template": "Template Net Cisco IOS SNMP"
+    },
+    {
+      "vendor": "Cisco",
+      "type": "ROUTER",
+      "template": "Template Net Cisco IOS SNMP"
+    },
+    {
+      "vendor": "Juniper",
+      "type": "FIREWALL",
+      "template": "Template Net Juniper SRX SNMP"
+    },
+    {
+      "vendor": "Fortinet",
+      "type": "FIREWALL",
+      "template": "Template Net Fortinet FortiGate SNMP"
+    },
+    {
+      "vendor": "Linux",
+      "type": "SERVER",
+      "template": "Template OS Linux by Zabbix agent"
+    }
+  ],
+  "defaults": {
+    "SWITCH": "Template Module Generic Switch SNMP",
+    "ROUTER": "Template Module Generic Router SNMP",
+    "FIREWALL": "Template Module Generic Firewall SNMP",
+    "SERVER": "Template OS Linux by Zabbix agent",
+    "default": "Template Module ICMP Ping"
+  }
+}
