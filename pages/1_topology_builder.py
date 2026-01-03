@@ -18,7 +18,6 @@ DEFAULT_DEVICE_TYPES = [
     "LOAD_BALANCER", "STORAGE", "CLOUD", "PC"
 ]
 
-# タイプごとの色定義（デフォルト）
 TYPE_COLORS = {
     "ROUTER": "#667eea", "SWITCH": "#11998e", "FIREWALL": "#eb3349",
     "SERVER": "#2193b0", "ACCESS_POINT": "#f7971e", "LOAD_BALANCER": "#4776E6",
@@ -41,7 +40,6 @@ def init_session():
     if "selected_devices" not in st.session_state:
         st.session_state.selected_devices = set()
     
-    # マスタデータ (編集可能)
     if "master_device_types" not in st.session_state:
         st.session_state.master_device_types = DEFAULT_DEVICE_TYPES.copy()
     if "master_vendors" not in st.session_state:
@@ -49,18 +47,14 @@ def init_session():
     if "module_master_list" not in st.session_state:
         st.session_state.module_master_list = ["LineCard", "Supervisor", "SFP+"]
         
-    # トポロジー全体設定
     if "site_name" not in st.session_state:
-        st.session_state.site_name = "Tokyo-HQ" # デフォルト
+        st.session_state.site_name = "Tokyo-HQ"
 
 # ==================== ロジック・計算 ====================
 def calculate_layers() -> Dict[str, int]:
-    """レイヤー計算（最長パス法）"""
     devices = st.session_state.devices
     connections = st.session_state.connections
-    
-    if not devices:
-        return {}
+    if not devices: return {}
     
     layers = {d: 1 for d in devices}
     connected_nodes = set()
@@ -91,17 +85,13 @@ def calculate_layers() -> Dict[str, int]:
                 if layers[p2] != max_layer:
                     layers[p2] = max_layer
                     changed = True
-        if not changed:
-            break
+        if not changed: break
             
     for d in devices:
-        if d not in connected_nodes:
-            layers[d] = 0
-            
+        if d not in connected_nodes: layers[d] = 0
     return layers
 
 def calculate_positions(layers: Dict[str, int]) -> Dict[str, Dict[str, int]]:
-    """重心法を用いた座標計算"""
     positions = {}
     connections = st.session_state.connections
     max_layer = max(layers.values()) if layers else 0
@@ -154,7 +144,6 @@ def calculate_positions(layers: Dict[str, int]) -> Dict[str, Dict[str, int]]:
     return positions
 
 def check_lineage(dev_a: str, dev_b: str) -> bool:
-    """親子関係チェック"""
     connections = st.session_state.connections
     parent_map = {}
     for conn in connections:
@@ -183,7 +172,6 @@ def check_lineage(dev_a: str, dev_b: str) -> bool:
     return dev_b in ancestors_a or dev_a in ancestors_b
 
 def check_cycle_for_uplink(parent: str, child: str) -> bool:
-    """循環参照チェック"""
     connections = st.session_state.connections
     parent_map = {}
     for conn in connections:
@@ -205,10 +193,8 @@ def check_cycle_for_uplink(parent: str, child: str) -> bool:
 
 # ==================== vis.js HTML ====================
 def generate_visjs_html() -> str:
-    """vis.jsのHTML生成"""
     devices = st.session_state.devices
     connections = st.session_state.connections
-    
     if not devices:
         return "<div style='padding:40px;text-align:center;color:#888;background:#f5f5f5;border-radius:8px;'>📍 デバイスを追加してください</div>"
     
@@ -218,7 +204,6 @@ def generate_visjs_html() -> str:
     nodes_data = []
     for dev_id, dev in devices.items():
         dev_type = dev.get("type", "SWITCH")
-        # 色はタイプ名に基づいて固定割り当てまたはデフォルト
         color = TYPE_COLORS.get(dev_type, "#999999")
         vendor = dev.get("metadata", {}).get("vendor") or ""
         
@@ -227,20 +212,10 @@ def generate_visjs_html() -> str:
         if vendor: label += f"\\n({vendor})"
         
         nodes_data.append({
-            "id": dev_id,
-            "label": label,
-            "x": pos["x"],
-            "y": pos["y"],
-            "color": {
-                "background": color, 
-                "border": "#222",
-                "highlight": {"border": "#222", "background": "#ffdd00"}
-            },
+            "id": dev_id, "label": label, "x": pos["x"], "y": pos["y"],
+            "color": {"background": color, "border": "#222", "highlight": {"border": "#222", "background": "#ffdd00"}},
             "font": {"color": "white", "size": 14, "face": "arial", "vadjust": 0},
-            "shape": "box",
-            "margin": 10,
-            "shadow": True,
-            "physics": False 
+            "shape": "box", "margin": 10, "shadow": True, "physics": False 
         })
     
     edges_data = []
@@ -248,31 +223,22 @@ def generate_visjs_html() -> str:
         conn_meta = conn.get("metadata", {})
         is_lag = conn_meta.get("lag_enabled", False)
         vlans = conn_meta.get("vlans", "")
-        
         edge_color = "#3498db" if is_lag else "#555"
         edge_width = 5 if is_lag else 2
         edge_label = f"VLAN: {vlans}" if vlans else ""
         
         base_edge = {
-            "from": conn["from"],
-            "to": conn["to"],
-            "label": edge_label,
+            "from": conn["from"], "to": conn["to"], "label": edge_label,
             "font": {"size": 10, "align": "middle", "background": "white"},
-            "color": {"color": edge_color},
-            "width": edge_width,
-            "smooth": False
+            "color": {"color": edge_color}, "width": edge_width, "smooth": False
         }
-
         if conn["type"] == "uplink":
-            base_edge["from"] = conn["to"]
-            base_edge["to"] = conn["from"]
-            base_edge["arrows"] = "to"
+            base_edge["from"] = conn["to"]; base_edge["to"] = conn["from"]; base_edge["arrows"] = "to"
         else:
             base_edge["color"]["color"] = "#f1c40f" if not is_lag else "#f39c12"
             base_edge["dashes"] = [8, 8] if not is_lag else False
             base_edge["arrows"] = ""
             base_edge["width"] = 3 if not is_lag else 5
-            
         edges_data.append(base_edge)
     
     return f"""
@@ -356,7 +322,6 @@ def manage_modules_dialog():
                 st.rerun()
     else:
         st.info("定義なし")
-    
     st.divider()
     new_mod = st.text_input("新規モジュール名", placeholder="例: LineCard-10G")
     if st.button("追加", key="add_mod"):
@@ -367,7 +332,6 @@ def manage_modules_dialog():
 @st.dialog("マスタデータ管理 (Type/Vendor)")
 def manage_master_data_dialog():
     tab1, tab2 = st.tabs(["デバイスType", "Vendor"])
-    
     with tab1:
         st.write("デバイスの種別（Type）を定義します。")
         for i, t in enumerate(st.session_state.master_device_types):
@@ -376,13 +340,11 @@ def manage_master_data_dialog():
             if c2.button("削除", key=f"del_type_{i}"):
                 st.session_state.master_device_types.pop(i)
                 st.rerun()
-        
         new_t = st.text_input("新規Type名", placeholder="例: FIREWALL", key="new_type_in")
         if st.button("Type追加", key="add_type_btn"):
             if new_t and new_t not in st.session_state.master_device_types:
                 st.session_state.master_device_types.append(new_t)
                 st.rerun()
-
     with tab2:
         st.write("ベンダー（Vendor）を定義します。")
         for i, v in enumerate(st.session_state.master_vendors):
@@ -391,7 +353,6 @@ def manage_master_data_dialog():
             if c2.button("削除", key=f"del_vend_{i}"):
                 st.session_state.master_vendors.pop(i)
                 st.rerun()
-        
         new_v = st.text_input("新規Vendor名", placeholder="例: Cisco", key="new_vend_in")
         if st.button("Vendor追加", key="add_vend_btn"):
             if new_v and new_v not in st.session_state.master_vendors:
@@ -411,14 +372,7 @@ def clear_data_dialog():
 def render_sidebar():
     with st.sidebar:
         st.header("🏢 トポロジー全体設定")
-        # 拠点名（Site Name）の入力
-        st.session_state.site_name = st.text_input(
-            "拠点名 (Site Name)", 
-            value=st.session_state.site_name,
-            help="例: Tokyo-HQ, Osaka-Branch"
-        )
-        
-        # NOTE: マスタ管理ボタンは編集フォームの基本情報タブへ移動しました
+        st.session_state.site_name = st.text_input("拠点名 (Site Name)", value=st.session_state.site_name, help="例: Tokyo-HQ, Osaka-Branch")
 
 def render_add_device():
     with st.expander("➕ デバイス追加", expanded=len(st.session_state.devices) == 0):
@@ -476,6 +430,13 @@ def render_device_list():
         for dev_id in all_devs:
             dev = st.session_state.devices[dev_id]
             meta = dev.get("metadata", {})
+            
+            # 【改修】必須項目チェック
+            missing_items = []
+            if not meta.get("vendor"): missing_items.append("Vendor")
+            if not meta.get("model"): missing_items.append("Model")
+            if not meta.get("rack_info"): missing_items.append("設置場所")
+            
             c_chk, c_card = st.columns([0.5, 6])
             c_chk.write(""); c_chk.checkbox("", key=f"chk_{dev_id}")
             
@@ -484,56 +445,48 @@ def render_device_list():
                 badges = []
                 if meta.get("vendor"): badges.append(meta["vendor"])
                 if meta.get("model"): badges.append(meta["model"])
-                # 詳細な設置場所
                 if meta.get("rack_info"): badges.append(f"📍{meta['rack_info']}")
                 if badges: st.caption(" | ".join(badges))
+                
+                # 【改修】警告表示
+                if missing_items:
+                    st.warning(f"⚠️ 未設定: {', '.join(missing_items)}")
 
             if st.session_state.editing_device == dev_id:
                 with st.container(border=True):
                     st.info(f"📝 **{dev_id}** を設定中...")
                     with st.form(key=f"form_{dev_id}"):
                         t1, t2, t3 = st.tabs(["基本情報", "HW/モジュール", "論理/NW"])
-                        
-                        # --- Tab 1: 基本情報 (Type/Vendor管理ボタン追加) ---
                         with t1:
-                            # ヘッダーと管理ボタン
                             tv_head, tv_btn = st.columns([3, 2])
                             tv_head.markdown("##### デバイス種別・ベンダー")
                             if tv_btn.form_submit_button("🛠️ Type/Vendor 管理"):
                                 manage_master_data_dialog()
 
                             r1c1, r1c2 = st.columns(2)
-                            # Type: マスタから選択
                             curr_type = dev.get("type", "SWITCH")
                             type_opts = st.session_state.master_device_types
                             idx_t = type_opts.index(curr_type) if curr_type in type_opts else 0
                             new_type = r1c1.selectbox("Type", type_opts, index=idx_t)
                             
-                            # Vendor: マスタから選択
                             curr_vend = meta.get("vendor", "")
                             vend_opts = [""] + st.session_state.master_vendors
                             idx_v = vend_opts.index(curr_vend) if curr_vend in vend_opts else 0
-                            new_vend = r1c2.selectbox("Vendor", vend_opts, index=idx_v)
+                            new_vend = r1c2.selectbox("Vendor", vend_opts, index=idx_v, help="⚠️ AI推論のために必須です")
 
                             r2c1, r2c2 = st.columns(2)
-                            new_model = r2c1.text_input("Model", value=meta.get("model", ""))
-                            # Location -> 設置場所(ラック等)に変更
-                            new_rack = r2c2.text_input("設置場所 (ラック情報など)", 
-                                                      value=meta.get("rack_info", meta.get("location", "")),
-                                                      help="例: Server Room 1, Rack A-10")
+                            new_model = r2c1.text_input("Model", value=meta.get("model", ""), help="⚠️ AI推論のために必須です")
+                            new_rack = r2c2.text_input("設置場所 (ラック情報など)", value=meta.get("rack_info", meta.get("location", "")), help="⚠️ 必須情報です")
 
-                        # --- Tab 2: HW/モジュール ---
                         with t2:
                             h1, h2 = st.columns(2)
                             new_psu = h1.number_input("PSU数", min_value=0, value=meta.get("hw_inventory", {}).get("psu_count", 1))
                             new_fan = h2.number_input("FAN数", min_value=0, value=meta.get("hw_inventory", {}).get("fan_count", 0))
-                            
                             st.divider()
                             cm1, cm2 = st.columns([3,2])
                             cm1.markdown("##### 追加モジュール構成")
                             if cm2.form_submit_button("🛠️ モジュール定義編集"):
                                 manage_modules_dialog()
-                            
                             curr_mods = meta.get("hw_inventory", {}).get("custom_modules", {})
                             new_mods = {}
                             if st.session_state.module_master_list:
@@ -542,7 +495,6 @@ def render_device_list():
                                     val = cols[i%2].number_input(f"{mname} 数", min_value=0, value=curr_mods.get(mname, 0), key=f"mnum_{dev_id}_{mname}")
                                     if val > 0: new_mods[mname] = int(val)
 
-                        # --- Tab 3: 論理/NW ---
                         with t3:
                             st.markdown("##### 接続ごとの論理設定")
                             related = [(i,c) for i,c in enumerate(st.session_state.connections) if c['from']==dev_id or c['to']==dev_id]
@@ -558,11 +510,13 @@ def render_device_list():
                                     updated_conns[idx] = {"lag_enabled": islag, "vlans": ivlans}
 
                         st.divider()
-                        
-                        # 保存・キャンセルボタン (横並び)
                         c_save, c_cancel = st.columns([1, 1])
                         with c_save:
                             if st.form_submit_button("💾 保存", type="primary", use_container_width=True):
+                                # バリデーションチェック（警告のみ）
+                                if not new_vend or not new_model or not new_rack:
+                                    st.warning("⚠️ Vendor, Model, 設置場所 の一部が未入力です。後工程のために設定を推奨します。")
+                                
                                 st.session_state.devices[dev_id]["type"] = new_type
                                 st.session_state.devices[dev_id]["metadata"].update({
                                     "vendor": new_vend,
@@ -574,7 +528,6 @@ def render_device_list():
                                     st.session_state.connections[idx]["metadata"] = cmeta
                                 st.session_state.editing_device = None
                                 st.rerun()
-                        
                         with c_cancel:
                             if st.form_submit_button("キャンセル", use_container_width=True):
                                 st.session_state.editing_device = None
@@ -588,9 +541,18 @@ def render_data_io():
         fname = st.text_input("保存ファイル名", value="topology.json")
         if not fname.endswith(".json"): fname += ".json"
         
-        # 保存データ構築
+        # 【改修】エクスポート前のデータチェック
+        incomplete_count = 0
+        for d in st.session_state.devices.values():
+            m = d.get("metadata", {})
+            if not all([m.get("vendor"), m.get("model"), m.get("rack_info")]):
+                incomplete_count += 1
+        
+        if incomplete_count > 0:
+            st.warning(f"⚠️ {incomplete_count} 台のデバイスで必須情報（ベンダー、モデル、設置場所）が未入力です。AIによる設定生成の精度が下がる可能性があります。")
+
         export_data = {
-            "site_name": st.session_state.site_name, # トポロジー全体の拠点名
+            "site_name": st.session_state.site_name,
             "topology": {},
             "connections": st.session_state.connections,
             "master_data": {
@@ -603,15 +565,10 @@ def render_data_io():
         layers = calculate_layers()
         for did, ddata in st.session_state.devices.items():
             parents = [c["to"] for c in st.session_state.connections if c["from"] == did and c["type"] == "uplink"]
-            # 互換性: location フィールドにも rack_info を入れる
             meta = ddata["metadata"].copy()
             meta["location"] = meta.get("rack_info", "")
-            
             export_data["topology"][did] = {
-                "type": ddata["type"],
-                "layer": layers.get(did, 1),
-                "parent_ids": parents,
-                "metadata": meta
+                "type": ddata["type"], "layer": layers.get(did, 1), "parent_ids": parents, "metadata": meta
             }
             
         st.download_button("📥 JSONダウンロード", json.dumps(export_data, indent=2, ensure_ascii=False), fname, "application/json", type="primary")
@@ -623,39 +580,24 @@ def render_data_io():
         if uploaded and st.button("適用", type="primary"):
             try:
                 data = json.load(uploaded)
-                
-                # グローバル設定復元
                 if "site_name" in data: st.session_state.site_name = data["site_name"]
-                
-                # マスタ復元
                 mdata = data.get("master_data", {})
                 if "device_types" in mdata: st.session_state.master_device_types = mdata["device_types"]
                 if "vendors" in mdata: st.session_state.master_vendors = mdata["vendors"]
                 if "modules" in mdata: st.session_state.module_master_list = mdata["modules"]
-                elif "module_master_list" in data: st.session_state.module_master_list = data["module_master_list"] # 旧互換
-
-                # デバイス復元
+                elif "module_master_list" in data: st.session_state.module_master_list = data["module_master_list"]
+                
                 topo = data.get("topology", {})
                 new_devs = {}
                 for did, val in topo.items():
                     meta = val.get("metadata", {})
-                    # 旧データ互換
-                    if "rack_info" not in meta and "location" in meta:
-                        meta["rack_info"] = meta["location"]
-                    
-                    new_devs[did] = {
-                        "type": val.get("type", "SWITCH"),
-                        "metadata": meta
-                    }
+                    if "rack_info" not in meta and "location" in meta: meta["rack_info"] = meta["location"]
+                    new_devs[did] = {"type": val.get("type", "SWITCH"), "metadata": meta}
                 st.session_state.devices = new_devs
-                
-                # 接続復元
                 if "connections" in data: st.session_state.connections = data["connections"]
-                
                 st.success("読み込み完了")
                 st.rerun()
-            except Exception as e:
-                st.error(f"エラー: {e}")
+            except Exception as e: st.error(f"エラー: {e}")
                 
     st.divider()
     if st.button("🗑️ 全データをクリア", type="primary", use_container_width=True):
@@ -665,20 +607,15 @@ def render_data_io():
 def main():
     init_session()
     render_sidebar()
-    
     st.title("🔧 トポロジービルダー")
     components.html(generate_visjs_html(), height=480)
-    
     c_left, c_right = st.columns([1, 1])
     with c_left:
         render_add_device()
         render_device_list()
-    
     with c_right:
-        # 接続リスト表示
         all_conns = st.session_state.connections
         sel_devs = [d for d in st.session_state.devices if st.session_state.get(f"chk_{d}")]
-        
         display_conns = []
         if sel_devs:
             display_conns = [(i,c) for i,c in enumerate(all_conns) if c["from"] in sel_devs or c["to"] in sel_devs]
@@ -688,7 +625,6 @@ def main():
             display_conns = [(i,c) for i,c in enumerate(all_conns)]
             head = f"🔗 全接続 ({len(display_conns)})"
             expanded = False
-            
         with st.expander(head, expanded=expanded):
             for i, c in display_conns:
                 c1, c2 = st.columns([6,1])
@@ -696,13 +632,11 @@ def main():
                 tags = ""
                 if meta.get("lag_enabled"): tags += " [LAG]"
                 if meta.get("vlans"): tags += f" [VLAN:{meta['vlans']}]"
-                
                 label = f"**⬇️** {c['to']} → {c['from']}" if c['type'] == 'uplink' else f"**↔️** {c['from']} ↔ {c['to']}"
                 c1.markdown(f"{label} {tags}")
                 if c2.button("🗑️", key=f"del_conn_{i}"):
                     st.session_state.connections.pop(i)
                     st.rerun()
-                    
         render_data_io()
 
 if __name__ == "__main__":
