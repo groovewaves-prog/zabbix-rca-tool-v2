@@ -431,11 +431,11 @@ def render_device_list():
             dev = st.session_state.devices[dev_id]
             meta = dev.get("metadata", {})
             
-            # 【改修】必須項目チェック
+            # 【改修】必須項目チェック（設置場所を除外）
             missing_items = []
             if not meta.get("vendor"): missing_items.append("Vendor")
             if not meta.get("model"): missing_items.append("Model")
-            if not meta.get("rack_info"): missing_items.append("設置場所")
+            # 設置場所(rack_info)は必須としない
             
             c_chk, c_card = st.columns([0.5, 6])
             c_chk.write(""); c_chk.checkbox("", key=f"chk_{dev_id}")
@@ -448,7 +448,6 @@ def render_device_list():
                 if meta.get("rack_info"): badges.append(f"📍{meta['rack_info']}")
                 if badges: st.caption(" | ".join(badges))
                 
-                # 【改修】警告表示
                 if missing_items:
                     st.warning(f"⚠️ 未設定: {', '.join(missing_items)}")
 
@@ -476,7 +475,7 @@ def render_device_list():
 
                             r2c1, r2c2 = st.columns(2)
                             new_model = r2c1.text_input("Model", value=meta.get("model", ""), help="⚠️ AI推論のために必須です")
-                            new_rack = r2c2.text_input("設置場所 (ラック情報など)", value=meta.get("rack_info", meta.get("location", "")), help="⚠️ 必須情報です")
+                            new_rack = r2c2.text_input("設置場所 (ラック情報など)", value=meta.get("rack_info", meta.get("location", "")), help="任意")
 
                         with t2:
                             h1, h2 = st.columns(2)
@@ -513,9 +512,8 @@ def render_device_list():
                         c_save, c_cancel = st.columns([1, 1])
                         with c_save:
                             if st.form_submit_button("💾 保存", type="primary", use_container_width=True):
-                                # バリデーションチェック（警告のみ）
-                                if not new_vend or not new_model or not new_rack:
-                                    st.warning("⚠️ Vendor, Model, 設置場所 の一部が未入力です。後工程のために設定を推奨します。")
+                                if not new_vend or not new_model:
+                                    st.warning("⚠️ VendorまたはModelが未入力です。後工程のために設定を推奨します。")
                                 
                                 st.session_state.devices[dev_id]["type"] = new_type
                                 st.session_state.devices[dev_id]["metadata"].update({
@@ -541,15 +539,15 @@ def render_data_io():
         fname = st.text_input("保存ファイル名", value="topology.json")
         if not fname.endswith(".json"): fname += ".json"
         
-        # 【改修】エクスポート前のデータチェック
+        # 【改修】エクスポートチェック（設置場所を除外）
         incomplete_count = 0
         for d in st.session_state.devices.values():
             m = d.get("metadata", {})
-            if not all([m.get("vendor"), m.get("model"), m.get("rack_info")]):
+            if not all([m.get("vendor"), m.get("model")]):
                 incomplete_count += 1
         
         if incomplete_count > 0:
-            st.warning(f"⚠️ {incomplete_count} 台のデバイスで必須情報（ベンダー、モデル、設置場所）が未入力です。AIによる設定生成の精度が下がる可能性があります。")
+            st.warning(f"⚠️ {incomplete_count} 台のデバイスでVendorまたはModelが未入力です。AIによる設定生成の精度が下がる可能性があります。")
 
         export_data = {
             "site_name": st.session_state.site_name,
