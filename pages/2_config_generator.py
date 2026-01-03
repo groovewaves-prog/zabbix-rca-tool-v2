@@ -8,7 +8,7 @@ import json
 import os
 import requests
 import pandas as pd
-import time # sleepは削除したがモジュールは念のため残す
+import time
 from typing import Dict, List, Any
 
 # Google Generative AI ライブラリのインポート試行
@@ -29,7 +29,7 @@ st.set_page_config(
 # ==================== データディレクトリ ====================
 DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
 
-# ==================== デフォルト定義 (インターバル設定を追加) ====================
+# ==================== デフォルト定義 ====================
 DEFAULT_TRIGGER_RULES = [
     {
         "id": "ping_check",
@@ -98,6 +98,7 @@ DEFAULT_TEMPLATE_MAPPING = {
 
 # ==================== データI/O関数 ====================
 def load_full_topology_data():
+    """トポロジーファイル全体を読み込む"""
     path = os.path.join(DATA_DIR, "topology.json")
     if os.path.exists(path):
         with open(path, "r", encoding="utf-8") as f:
@@ -125,7 +126,7 @@ def save_json_config(filename, data):
 def save_trigger_rules(rules):
     save_json_config("trigger_rules.json", rules)
 
-# ==================== AIエージェント (Gemma 3 / No Wait) ====================
+# ==================== AIエージェント ====================
 class TemplateRecommenderAI:
     def __init__(self):
         self.api_key = st.secrets.get("GOOGLE_API_KEY") or os.getenv("GOOGLE_API_KEY")
@@ -190,7 +191,6 @@ class TemplateRecommenderAI:
             dtype = dev['type'].upper()
             template = "Template Module ICMP Ping"
             if "cisco" in vendor and dtype == "SWITCH": template = "Template Net Cisco IOS SNMP"
-            # ... (簡易ロジック) ...
             recommendations.append({"vendor": dev['vendor'], "type": dev['type'], "template": template})
         
         return recommendations
@@ -277,7 +277,6 @@ def generate_zabbix_config(full_data: Dict, options: Dict, trigger_rules: List, 
         }]
 
         macros = []
-        # モジュール数マクロ
         if hw.get("psu_count"): macros.append({"macro": "{$EXPECTED_PSU_COUNT}", "value": str(hw["psu_count"])})
         if hw.get("fan_count"): macros.append({"macro": "{$EXPECTED_FAN_COUNT}", "value": str(hw["fan_count"])})
         for mod_name in module_master:
@@ -285,12 +284,9 @@ def generate_zabbix_config(full_data: Dict, options: Dict, trigger_rules: List, 
             safe_name = mod_name.upper().replace("-", "_").replace(" ", "_").replace("+", "PLUS")
             macros.append({"macro": f"{{$EXPECTED_{safe_name}_COUNT}}", "value": str(count)})
 
-        # トリガールール（閾値 + 間隔）
         for rule in trigger_rules:
-            # 閾値マクロ
             if rule.get("threshold_macro") and rule.get("default_value") is not None:
                 macros.append({"macro": rule["threshold_macro"], "value": str(rule["default_value"])})
-            # 間隔マクロ (テンプレート側でこのマクロを使用している前提)
             if rule.get("interval_macro") and rule.get("default_interval") is not None:
                 macros.append({"macro": rule["interval_macro"], "value": f"{rule['default_interval']}s"})
 
@@ -453,30 +449,32 @@ def main():
     
     st.divider()
 
-    data = None
+    # データロード
+    full_data = None
     if uploaded_file:
-        data = json.load(uploaded_file)
+        full_data = json.load(uploaded_file)
         st.info(f"📂 ファイル読み込み: {uploaded_file.name}")
     else:
-        data = load_full_topology_data()
-        if data and data.get("topology"):
+        full_data = load_full_topology_data()
+        if full_data and full_data.get("topology"):
             st.info("📂 サーバー上のデータを使用")
     
-    if not data:
-        st.warning("⚠️ データがありません。ファイルをアップロードするかトポロジービルダーを実行してください。")
+    # データの存在チェック
+    if not full_data or not full_data.get("topology"):
+        st.warning("⚠️ トポロジーデータが見つからないか、デバイスが登録されていません。トポロジービルダーでデバイスを追加してください。")
         return
 
     trigger_rules = load_json_config("trigger_rules.json", DEFAULT_TRIGGER_RULES)
     template_mapping = load_json_config("template_mapping.json", DEFAULT_TEMPLATE_MAPPING)
 
-    # --- AIテンプレートレコメンド ---
-    with st.expander("🤖 テンプレート自動マッピング (AI)", expanded=True):
+    # --- 1. テンプレート割り当てルール (AI) ---
+    with st.expander("1. テンプレート割り当てルール (Vendor/Type定義)", expanded=True):
         st.write("トポロジー内のデバイス情報（ベンダー、モデル）を分析し、最適なZabbixテンプレートを自動割り当てします。")
         
         if st.button("✨ AIで推奨テンプレートを生成・適用", type="primary"):
             devices_summary = []
             seen = set()
-            for d in data["topology"].values():
+            for d in full_data.get("topology", {}).values():
                 meta = d.get("metadata", {})
                 key = (meta.get("vendor"), d.get("type"), meta.get("model"))
                 if key not in seen and key[0]:
@@ -490,7 +488,7 @@ def main():
                     ai = TemplateRecommenderAI()
                     recommendations = ai.recommend(devices_summary)
                     
-                    st.write("マッピングルールを更新しています...")
+                    st.write("マッピングルールを更新中...")
                     current_mappings = template_mapping.get("mappings", [])
                     added_count = 0
                     for rec in recommendations:
@@ -509,23 +507,19 @@ def main():
                 st.success(f"✅ {added_count} 件の新しいマッピングルールを追加しました！")
                 st.rerun()
 
-        # 【修正】テーブルはデータがある場合のみ表示 (AI未実施時の混乱防止)
         if template_mapping.get("mappings"):
             st.caption("現在の適用ルール:")
             st.dataframe(pd.DataFrame(template_mapping["mappings"]), use_container_width=True)
 
-    # --- 【修正】監視ルール・閾値の設定 (不要項目削除・インターバル追加) ---
-    st.subheader("🛠️ 監視ルール・閾値の設定")
+    # --- 2. 共通監視ポリシー (閾値・間隔設定) ---
+    st.subheader("2. 共通監視ポリシー (閾値・間隔設定)")
     
     with st.container(border=True):
-        # Ping監視タイプ、基本監視間隔のスライダーは削除しました
         create_action = st.toggle("標準通知設定を作成", value=True)
-        
         st.divider()
         st.markdown("##### ⚡ トリガー設定 (閾値 / 監視間隔)")
         st.caption("各監視項目の閾値および監視間隔を編集できます。設定内容は「保存」後に「Zabbix設定ファイル」に反映されます。")
 
-        # 表示用データフレーム作成
         rows = []
         for r in trigger_rules:
             if r.get("threshold_macro") or r.get("interval_macro"):
@@ -558,7 +552,6 @@ def main():
                 num_rows="fixed"
             )
 
-            # ボタン名称変更
             if st.button("💾 設定を保存して反映", type="primary"):
                 is_changed = False
                 for index, row in edited_df.iterrows():
@@ -585,8 +578,8 @@ def main():
             st.info("設定可能なルールがありません。")
 
     # 設定生成
-    options = {"create_action": create_action, "interval": 60} # intervalダミー
-    config = generate_zabbix_config(data, options, trigger_rules, template_mapping)
+    options = {"create_action": create_action, "interval": 60}
+    config = generate_zabbix_config(full_data, options, trigger_rules, template_mapping)
     
     st.subheader("1. 設定内容の確認")
     
@@ -617,7 +610,7 @@ def main():
         st.dataframe(pd.DataFrame(df_hosts), use_container_width=True)
 
     with tab_group:
-        st.caption(f"※ 拠点名({data.get('site_name','Unknown')})/機器タイプ の階層構造")
+        st.caption(f"※ 拠点名({full_data.get('site_name','Unknown')})/機器タイプ の階層構造")
         st.dataframe(pd.DataFrame(config["host_groups"]), use_container_width=True)
 
     with tab_dep:
