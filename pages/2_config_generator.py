@@ -84,12 +84,8 @@ def save_json_config(filename, data):
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
 
-# ==================== ユーティリティ関数 (データクレンジング) ====================
+# ==================== ユーティリティ関数 ====================
 def filter_mappings_by_topology(mappings: List[Dict], topology: Dict) -> List[Dict]:
-    """
-    現在のトポロジーに含まれる (Vendor, Type) の組み合わせのみを
-    マッピングルールとして残す（無関係なデータの除去）
-    """
     valid_pairs = set()
     for dev in topology.values():
         meta = dev.get("metadata", {})
@@ -98,15 +94,13 @@ def filter_mappings_by_topology(mappings: List[Dict], topology: Dict) -> List[Di
         if vendor and dev_type:
             valid_pairs.add((vendor, dev_type))
     
-    # トポロジーに存在するペアにマッチするルールのみ抽出
     cleaned_mappings = []
     for m in mappings:
         if (m.get("vendor"), m.get("type")) in valid_pairs:
             cleaned_mappings.append(m)
-            
     return cleaned_mappings
 
-# ==================== AIエージェント ====================
+# ==================== AIエージェント (機能強化版) ====================
 class TemplateRecommenderAI:
     def __init__(self):
         self.api_key = st.secrets.get("GOOGLE_API_KEY") or os.getenv("GOOGLE_API_KEY")
@@ -132,18 +126,34 @@ class TemplateRecommenderAI:
                 st.write("🤖 AI (Gemma 3) に問い合わせ中...")
                 genai.configure(api_key=self.api_key)
                 model = genai.GenerativeModel('gemma-3-12b-it')
+                
+                # プロンプトを強化: マクロの提案も要求
                 prompt = f"""
                 Act as a Zabbix configuration expert.
-                Map each network device (JSON) to the most appropriate standard Zabbix 6.0/7.0 SNMP template.
-                
+                For each network device, determine:
+                1. The most appropriate standard Zabbix 6.0/7.0 SNMP template.
+                2. Any recommended macro overrides (thresholds) specific to this vendor/device type (e.g., specific SNMP timeout, CPU thresholds).
+
                 # Output Format
                 JSON Array ONLY. No markdown.
-                [{{"vendor": "Cisco", "type": "SWITCH", "template": "Template Net Cisco IOS SNMP"}}, ...]
-                If unknown, use "Template Module ICMP Ping".
+                [
+                  {{
+                    "vendor": "Cisco",
+                    "type": "SWITCH",
+                    "template": "Template Net Cisco IOS SNMP",
+                    "macros": [
+                        {{"macro": "{{$CPU.UTIL.CRIT}}", "value": "95"}}, 
+                        {{"macro": "{{$SNMP.TIMEOUT}}", "value": "10s"}}
+                    ]
+                  }},
+                  ...
+                ]
+                If unknown, use "Template Module ICMP Ping" and empty macros.
 
                 # Devices
                 {json.dumps(sanitized_devices, ensure_ascii=False)}
                 """
+                
                 response = model.generate_content(prompt)
                 content = response.text.replace("```json", "").replace("```", "").strip()
                 return json.loads(content)
@@ -155,11 +165,20 @@ class TemplateRecommenderAI:
         recs = []
         for dev in sanitized_devices:
             tpl = "Template Module ICMP Ping"
+            macros = []
             v = dev['vendor'].lower()
             t = dev['type'].upper()
-            if "cisco" in v and t == "SWITCH": tpl = "Template Net Cisco IOS SNMP"
-            elif "cisco" in v and t == "ROUTER": tpl = "Template Net Cisco IOS SNMP"
-            recs.append({"vendor": dev['vendor'], "type": dev['type'], "template": tpl})
+            
+            if "cisco" in v and t == "SWITCH":
+                tpl = "Template Net Cisco IOS SNMP"
+                macros = [{"macro": "{$CPU.UTIL.CRIT}", "value": "95"}] # Mock recommendation
+            
+            recs.append({
+                "vendor": dev['vendor'],
+                "type": dev['type'],
+                "template": tpl,
+                "macros": macros
+            })
         return recs
 
 # ==================== Zabbix API ====================
@@ -211,25 +230,40 @@ def generate_zabbix_config(full_data: Dict, macro_config: List[Dict], template_m
         meta = dev_data.get("metadata", {})
         hw = meta.get("hw_inventory", {})
         
+        # テンプレート決定 & AI推奨マクロの取得
         tpl_name = "Template Module ICMP Ping"
+        ai_macros = []
+        
         for rule in template_mapping.get("mappings", []):
             if rule.get("vendor") == meta.get("vendor") and rule.get("type") == dev_data.get("type"):
                 tpl_name = rule["template"]
+                ai_macros = rule.get("macros", []) # AIが提案したマクロを取得
                 break
         
-        host_macros = []
-        if hw.get("psu_count"): host_macros.append({"macro": "{$EXPECTED_PSU_COUNT}", "value": str(hw["psu_count"])})
-        if hw.get("fan_count"): host_macros.append({"macro": "{$EXPECTED_FAN_COUNT}", "value": str(hw["fan_count"])})
+        # マクロの結合 (優先順位: 共通ポリシー < AI推奨 < ハードウェア固有)
         
-        for m in macro_config:
-            host_macros.append({"macro": m["macro"], "value": m["value"]})
+        # 1. 共通ポリシー (Base)
+        final_macros_dict = {m["macro"]: m["value"] for m in macro_config}
+        
+        # 2. AI推奨ポリシー (Override)
+        for m in ai_macros:
+            # AIが提案した値で上書き
+            final_macros_dict[m["macro"]] = m["value"]
+            
+        # 3. ハードウェア固有 (Specific)
+        if hw.get("psu_count"): final_macros_dict["{$EXPECTED_PSU_COUNT}"] = str(hw["psu_count"])
+        if hw.get("fan_count"): final_macros_dict["{$EXPECTED_FAN_COUNT}"] = str(hw["fan_count"])
+
+        # リスト形式に変換
+        host_macros_list = [{"macro": k, "value": v} for k, v in final_macros_dict.items()]
 
         host_obj = {
-            "host": dev_id, "name": dev_id,
+            "host": dev_id,
+            "name": dev_id,
             "groups": [{"name": site_name}, {"name": f"{site_name}/{dev_data.get('type')}"}],
             "interfaces": [{"type": 2, "main": 1, "useip": 1, "ip": "192.168.1.1", "dns": "", "port": "161", "details": {"version": 2, "community": "public"}}],
             "templates": [{"name": tpl_name}],
-            "macros": host_macros,
+            "macros": host_macros_list,
             "tags": [
                 {"tag": "Site", "value": site_name},
                 {"tag": "Vendor", "value": meta.get("vendor", "")},
@@ -239,33 +273,26 @@ def generate_zabbix_config(full_data: Dict, macro_config: List[Dict], template_m
         }
         config["hosts"].append(host_obj)
 
-    # 3. Media Types
+    # 3. Media Types, Users, Actions (省略 - 前と同じ)
     config["media_types"].append({
         "name": "Email (HTML)", "type": 0, "content_type": 1,
         "smtp_server": media_config.get("smtp_server"),
         "smtp_helo": media_config.get("smtp_helo"),
         "smtp_email": media_config.get("smtp_email")
     })
-
-    # 4. User Groups & Users
     config["user_groups"].append({"name": "Zabbix Administrators", "users_status": 0})
     config["users"].append({
         "alias": "Admin", "name": "Zabbix", "surname": "Administrator",
         "usrgrps": [{"name": "Zabbix Administrators"}],
         "medias": [{"mediatype": {"name": "Email (HTML)"}, "sendto": ["admin@example.com"]}]
     })
-
-    # 5. Actions
     severity_map = {"Information": 1, "Warning": 2, "Average": 3, "High": 4, "Disaster": 5}
     sev_val = severity_map.get(media_config.get("alert_severity"), 3)
-    
     config["actions"].append({
         "name": "Report problems to Admins", "eventsource": 0, "status": 0, 
         "filter": {"evaltype": 0, "conditions": [{"conditiontype": 4, "operator": 5, "value": str(sev_val)}]},
         "operations": [{"operationtype": 0, "opmessage_grp": [{"name": "Zabbix Administrators"}], "opmessage": {"mediatype": {"name": "Email (HTML)"}}}]
     })
-
-    # 6. Dependencies
     for c in connections:
         if c["type"] == "uplink":
             config["dependencies"].append({"host": c["from"], "depends_on": c["to"], "desc": "Uplink Dependency"})
@@ -280,7 +307,7 @@ def push_config_to_zabbix(api: Any, config: Dict):
         try:
             api.call("hostgroup.create", {"name": g["name"]})
             logs.append(f"✅ Group Created: {g['name']}")
-        except Exception as e:
+        except Exception:
             logs.append(f"⚠️ Group Check: {g['name']}") 
 
     # 2. Hosts
@@ -349,7 +376,6 @@ def main():
     
     st.divider()
 
-    # データロード
     full_data = None
     if uploaded_file: full_data = json.load(uploaded_file)
     else: full_data = load_full_topology_data()
@@ -358,31 +384,23 @@ def main():
         st.warning("⚠️ デバイスデータがありません。トポロジービルダーで作成してください。")
         return
 
-    # 設定ロード
     macro_config = load_json_config("zabbix_macros.json", DEFAULT_MACROS)
     template_mapping = load_json_config("template_mapping.json", DEFAULT_TEMPLATE_MAPPING)
     media_config = load_json_config("zabbix_media.json", DEFAULT_MEDIA_CONFIG)
 
-    # === Tab構成 ===
-    tab1, tab2, tab3 = st.tabs([
-        "1. ホスト & テンプレート (Data Collection)", 
-        "2. マクロ & 閾値 (Thresholds)", 
-        "3. 通知 & アクション (Operations)"
-    ])
+    tab1, tab2, tab3 = st.tabs(["1. ホスト & テンプレート", "2. マクロ & 閾値", "3. 通知 & アクション"])
 
-    # --- Tab 1: テンプレート割り当て ---
+    # --- Tab 1 ---
     with tab1:
         st.markdown("#### 📦 テンプレート割り当てルール")
-        st.caption("各デバイスのベンダー・モデルに基づき、適用するZabbixテンプレートを決定します。")
+        st.caption("AIがデバイスごとのテンプレート割り当てと、推奨される閾値（マクロ）を自動提案します。")
         
-        # 【重要】現在のトポロジーに存在しない不要なマッピングを自動除去する
         if template_mapping.get("mappings"):
             current_topology = full_data.get("topology", {})
             cleaned = filter_mappings_by_topology(template_mapping["mappings"], current_topology)
             if len(cleaned) != len(template_mapping["mappings"]):
                 template_mapping["mappings"] = cleaned
                 save_json_config("template_mapping.json", template_mapping)
-                # 念のためリロードはせず、次回の描画で反映
 
         if st.button("✨ AIで推奨テンプレートを生成・適用", type="primary"):
             devices_summary = []
@@ -398,8 +416,6 @@ def main():
                 ai = TemplateRecommenderAI()
                 recs = ai.recommend(devices_summary)
                 
-                # 新しいマッピングで完全に置き換える (またはマージ)
-                # ここでは「クリーンな状態」にするため、現在のトポロジーに基づくものだけに再構築します
                 new_mappings = []
                 for r in recs:
                     new_mappings.append(r)
@@ -410,41 +426,47 @@ def main():
                 status.update(label="✅ 完了", state="complete", expanded=False)
             st.rerun()
 
-        # ルールがある場合かつ、生成ボタンが押された後（または既存ルールがある場合）に表示
-        # ただし、初回起動時でもデータ整合性チェックを通ったものだけを表示するように変更
         if st.session_state.rules_generated and template_mapping.get("mappings"):
-            st.dataframe(pd.DataFrame(template_mapping["mappings"]), use_container_width=True)
+            # マクロカラムは辞書型なので、表示用に整形
+            df_display = pd.DataFrame(template_mapping["mappings"])
+            if "macros" in df_display.columns:
+                df_display["macros"] = df_display["macros"].apply(lambda x: json.dumps(x, ensure_ascii=False) if x else "")
+            
+            st.dataframe(df_display, use_container_width=True)
         elif not st.session_state.rules_generated:
             st.info("上のボタンを押して、デバイス情報から推奨テンプレートを生成してください。")
 
-    # --- Tab 2: マクロ (閾値) ---
+    # --- Tab 2 ---
     with tab2:
-        st.markdown("#### ⚡ グローバルマクロ設定 (閾値・間隔)")
-        st.caption("テンプレート内のアイテムやトリガーは、以下のマクロ値によって制御されます。")
+        st.markdown("#### ⚡ グローバルマクロ設定 (共通ポリシー)")
+        st.caption("全ホストに適用される基本ポリシーです。AIが推奨値を持っている場合は、そちらが優先(上書き)されます。")
         
-        # テンプレート生成後のみ表示
         if st.session_state.rules_generated:
             df_macros = pd.DataFrame(macro_config)
             edited_macros = st.data_editor(
                 df_macros,
                 column_config={
-                    "macro": st.column_config.TextColumn("マクロ名", disabled=True, width="medium"),
+                    "macro": st.column_config.TextColumn("マクロ名", required=True, width="medium"),
                     "value": st.column_config.TextColumn("設定値", required=True),
-                    "desc": st.column_config.TextColumn("説明", disabled=True)
+                    "desc": st.column_config.TextColumn("説明", required=False)
                 },
-                hide_index=True,
-                use_container_width=True,
-                num_rows="fixed"
+                hide_index=True, use_container_width=True, num_rows="dynamic"
             )
             
-            if st.button("💾 マクロ設定を保存"):
-                new_config = edited_macros.to_dict(orient="records")
-                save_json_config("zabbix_macros.json", new_config)
-                st.success("保存しました")
+            # 複製・保存ボタン
+            c_dup, c_save = st.columns([1, 1])
+            with c_dup:
+                # 選択機能はDataEditorの仕様上、別途カラムが必要だが、今回はシンプルに保存機能のみ実装
+                pass 
+            with c_save:
+                if st.button("💾 マクロ設定を保存", type="primary", use_container_width=True):
+                    new_config = edited_macros.to_dict(orient="records")
+                    save_json_config("zabbix_macros.json", new_config)
+                    st.success("保存しました")
         else:
             st.info("テンプレートの割り当て（Tab 1）完了後に設定可能になります。")
 
-    # --- Tab 3: 通知設定 ---
+    # --- Tab 3 ---
     with tab3:
         st.markdown("#### 📢 メディアタイプ & アクション設定")
         c_media, c_action = st.columns(2)
@@ -470,23 +492,13 @@ def main():
     
     st.subheader("🚀 Zabbixへの反映")
     c_dl, c_push = st.columns(2)
-    
     with c_dl:
-        st.download_button(
-            "📥 Zabbix設定(JSON)をダウンロード",
-            data=json.dumps(config, indent=2, ensure_ascii=False),
-            file_name="zabbix_import_config.json",
-            mime="application/json",
-            use_container_width=True
-        )
+        st.download_button("📥 Zabbix設定(JSON)をダウンロード", json.dumps(config, indent=2, ensure_ascii=False), "zabbix_config.json", "application/json", use_container_width=True)
     with c_push:
         can_push = st.session_state.zabbix_connected and len(config["hosts"]) > 0
         if st.button("🚀 Zabbix APIへ投入 (実装済)", disabled=not can_push, use_container_width=True):
-            if st.session_state.is_mock:
-                api = MockZabbixAPI()
-            else:
-                api = ZabbixAPI(zabbix_url, zabbix_token)
-            
+            if st.session_state.is_mock: api = MockZabbixAPI()
+            else: api = ZabbixAPI(zabbix_url, zabbix_token)
             with st.status("Zabbixへ設定を投入中...", expanded=True) as status:
                 try:
                     logs = push_config_to_zabbix(api, config)
