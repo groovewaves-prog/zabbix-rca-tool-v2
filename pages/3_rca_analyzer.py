@@ -565,7 +565,7 @@ def render_visjs(topology, rc_list, sym_list, unrelated_list=None):
 <script>
 var data = {{nodes: new vis.DataSet({json.dumps(nodes)}), edges: new vis.DataSet({json.dumps(edges)})}};
 var options = {{
-    layout:{{hierarchical:{{enabled:true, direction:"UD", sortMethod:"directed", levelSeparation: 100, nodeSpacing: 150}}}},
+    layout:{{hierarchical:{{enabled:true, direction:"DU", sortMethod:"directed", levelSeparation: 100, nodeSpacing: 150}}}},
     physics:{{enabled:false}},
     interaction:{{hover:true, tooltipDelay:100}}
 }};
