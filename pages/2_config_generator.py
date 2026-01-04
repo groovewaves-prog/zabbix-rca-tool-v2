@@ -100,7 +100,7 @@ def filter_mappings_by_topology(mappings: List[Dict], topology: Dict) -> List[Di
             cleaned_mappings.append(m)
     return cleaned_mappings
 
-# ==================== AIエージェント (機能強化版) ====================
+# ==================== AIエージェント ====================
 class TemplateRecommenderAI:
     def __init__(self):
         self.api_key = st.secrets.get("GOOGLE_API_KEY") or os.getenv("GOOGLE_API_KEY")
@@ -127,28 +127,23 @@ class TemplateRecommenderAI:
                 genai.configure(api_key=self.api_key)
                 model = genai.GenerativeModel('gemma-3-12b-it')
                 
-                # プロンプトを強化: マクロの提案も要求
                 prompt = f"""
                 Act as a Zabbix configuration expert.
                 For each network device, determine:
                 1. The most appropriate standard Zabbix 6.0/7.0 SNMP template.
-                2. Any recommended macro overrides (thresholds) specific to this vendor/device type (e.g., specific SNMP timeout, CPU thresholds).
+                2. Any recommended macro overrides (thresholds).
 
                 # Output Format
-                JSON Array ONLY. No markdown.
+                JSON Array ONLY.
                 [
                   {{
                     "vendor": "Cisco",
                     "type": "SWITCH",
                     "template": "Template Net Cisco IOS SNMP",
-                    "macros": [
-                        {{"macro": "{{$CPU.UTIL.CRIT}}", "value": "95"}}, 
-                        {{"macro": "{{$SNMP.TIMEOUT}}", "value": "10s"}}
-                    ]
-                  }},
-                  ...
+                    "macros": [{{"macro": "{{$CPU.UTIL.CRIT}}", "value": "95"}}]
+                  }}
                 ]
-                If unknown, use "Template Module ICMP Ping" and empty macros.
+                If unknown, use "Template Module ICMP Ping".
 
                 # Devices
                 {json.dumps(sanitized_devices, ensure_ascii=False)}
@@ -160,7 +155,6 @@ class TemplateRecommenderAI:
             except Exception as e:
                 st.error(f"AI Error: {e}")
         
-        # Mock Logic (Waitなし)
         st.write("🧠 知識ベースと照合中 (Mock)...")
         recs = []
         for dev in sanitized_devices:
@@ -168,17 +162,10 @@ class TemplateRecommenderAI:
             macros = []
             v = dev['vendor'].lower()
             t = dev['type'].upper()
-            
             if "cisco" in v and t == "SWITCH":
                 tpl = "Template Net Cisco IOS SNMP"
-                macros = [{"macro": "{$CPU.UTIL.CRIT}", "value": "95"}] # Mock recommendation
-            
-            recs.append({
-                "vendor": dev['vendor'],
-                "type": dev['type'],
-                "template": tpl,
-                "macros": macros
-            })
+                macros = [{"macro": "{$CPU.UTIL.CRIT}", "value": "95"}]
+            recs.append({"vendor": dev['vendor'], "type": dev['type'], "template": tpl, "macros": macros})
         return recs
 
 # ==================== Zabbix API ====================
@@ -204,7 +191,15 @@ class MockZabbixAPI:
     def __init__(self): pass
     def call(self, method: str, params: Any = None):
         if method == "apiinfo.version": return "6.4.0 (Mock)"
-        return {"result": []}
+        # モックでもID解決ができるようにダミーデータを返す
+        if method == "hostgroup.get": return [{"groupid": "101", "name": "Tokyo-HQ"}, {"groupid": "102", "name": "Tokyo-HQ/SWITCH"}]
+        if method == "hostgroup.create": return {"groupids": ["103"]}
+        if method == "template.get": return [{"templateid": "1001", "name": "Template Module ICMP Ping"}, {"templateid": "1002", "name": "Template Net Cisco IOS SNMP"}]
+        if method == "host.get": return []
+        if method == "host.create": return {"hostids": ["5001"]}
+        if method == "host.update": return {"hostids": ["5001"]}
+        if method == "action.create": return {"actionids": ["9001"]}
+        return []
     def check_connection(self): return "6.4.0 (Mock)"
 
 # ==================== 設定生成ロジック ====================
@@ -230,55 +225,37 @@ def generate_zabbix_config(full_data: Dict, macro_config: List[Dict], template_m
         meta = dev_data.get("metadata", {})
         hw = meta.get("hw_inventory", {})
         
-        # テンプレート決定 & AI推奨マクロの取得
         tpl_name = "Template Module ICMP Ping"
         ai_macros = []
         
         for rule in template_mapping.get("mappings", []):
             if rule.get("vendor") == meta.get("vendor") and rule.get("type") == dev_data.get("type"):
                 tpl_name = rule["template"]
-                ai_macros = rule.get("macros", []) # AIが提案したマクロを取得
+                ai_macros = rule.get("macros", [])
                 break
         
-        # マクロの結合 (優先順位: 共通ポリシー < AI推奨 < ハードウェア固有)
-        
-        # 1. 共通ポリシー (Base)
+        # マクロ結合
         final_macros_dict = {m["macro"]: m["value"] for m in macro_config}
-        
-        # 2. AI推奨ポリシー (Override)
         for m in ai_macros:
-            # AIが提案した値で上書き
             final_macros_dict[m["macro"]] = m["value"]
-            
-        # 3. ハードウェア固有 (Specific)
         if hw.get("psu_count"): final_macros_dict["{$EXPECTED_PSU_COUNT}"] = str(hw["psu_count"])
         if hw.get("fan_count"): final_macros_dict["{$EXPECTED_FAN_COUNT}"] = str(hw["fan_count"])
 
-        # リスト形式に変換
-        host_macros_list = [{"macro": k, "value": v} for k, v in final_macros_dict.items()]
-
         host_obj = {
-            "host": dev_id,
-            "name": dev_id,
+            "host": dev_id, "name": dev_id,
             "groups": [{"name": site_name}, {"name": f"{site_name}/{dev_data.get('type')}"}],
             "interfaces": [{"type": 2, "main": 1, "useip": 1, "ip": "192.168.1.1", "dns": "", "port": "161", "details": {"version": 2, "community": "public"}}],
             "templates": [{"name": tpl_name}],
-            "macros": host_macros_list,
-            "tags": [
-                {"tag": "Site", "value": site_name},
-                {"tag": "Vendor", "value": meta.get("vendor", "")},
-                {"tag": "Rack", "value": meta.get("rack_info") or meta.get("location") or ""}
-            ],
+            "macros": [{"macro": k, "value": v} for k, v in final_macros_dict.items()],
+            "tags": [{"tag": "Site", "value": site_name}, {"tag": "Vendor", "value": meta.get("vendor", "")}, {"tag": "Rack", "value": meta.get("rack_info") or meta.get("location") or ""}],
             "inventory_mode": 1
         }
         config["hosts"].append(host_obj)
 
-    # 3. Media Types, Users, Actions (省略 - 前と同じ)
+    # 3. Media/Users/Actions/Dependencies
     config["media_types"].append({
         "name": "Email (HTML)", "type": 0, "content_type": 1,
-        "smtp_server": media_config.get("smtp_server"),
-        "smtp_helo": media_config.get("smtp_helo"),
-        "smtp_email": media_config.get("smtp_email")
+        "smtp_server": media_config.get("smtp_server"), "smtp_helo": media_config.get("smtp_helo"), "smtp_email": media_config.get("smtp_email")
     })
     config["user_groups"].append({"name": "Zabbix Administrators", "users_status": 0})
     config["users"].append({
@@ -294,34 +271,95 @@ def generate_zabbix_config(full_data: Dict, macro_config: List[Dict], template_m
         "operations": [{"operationtype": 0, "opmessage_grp": [{"name": "Zabbix Administrators"}], "opmessage": {"mediatype": {"name": "Email (HTML)"}}}]
     })
     for c in connections:
-        if c["type"] == "uplink":
-            config["dependencies"].append({"host": c["from"], "depends_on": c["to"], "desc": "Uplink Dependency"})
+        if c["type"] == "uplink": config["dependencies"].append({"host": c["from"], "depends_on": c["to"], "desc": "Uplink Dependency"})
 
     return config
 
-# ==================== API投入ロジック ====================
+# ==================== API投入ロジック (修正版) ====================
 def push_config_to_zabbix(api: Any, config: Dict):
     logs = []
-    # 1. Host Groups
+    
+    # --- 1. Host Groups (Create & Get IDs) ---
+    group_map = {} # name -> id
+    
+    # 既存グループの取得（重複エラー回避のため）
+    try:
+        existing = api.call("hostgroup.get", {"output": ["groupid", "name"]})
+        group_map = {g['name']: g['groupid'] for g in existing}
+    except Exception as e:
+        logs.append(f"ℹ️ Pre-fetch groups failed (Mock?): {e}")
+
     for g in config["host_groups"]:
-        try:
-            api.call("hostgroup.create", {"name": g["name"]})
-            logs.append(f"✅ Group Created: {g['name']}")
-        except Exception:
-            logs.append(f"⚠️ Group Check: {g['name']}") 
+        g_name = g["name"]
+        if g_name in group_map:
+            logs.append(f"ℹ️ Group exists: {g_name}")
+        else:
+            try:
+                res = api.call("hostgroup.create", {"name": g_name})
+                new_id = res['groupids'][0]
+                group_map[g_name] = new_id
+                logs.append(f"✅ Group Created: {g_name}")
+            except Exception as e:
+                logs.append(f"⚠️ Group Create Failed {g_name}: {e}")
 
-    # 2. Hosts
+    # --- 2. Templates (Get IDs) ---
+    template_map = {} # name -> id
+    try:
+        t_list = api.call("template.get", {"output": ["templateid", "name"]})
+        template_map = {t['name']: t['templateid'] for t in t_list}
+    except: pass
+
+    # --- 3. Hosts (Create with Group IDs) ---
     for h in config["hosts"]:
-        try:
-            api.call("host.create", {"host": h["host"], "groups": [], "interfaces": []}) 
-            logs.append(f"✨ Host Configured: {h['host']}")
-        except Exception:
-            logs.append(f"⚠️ Host Error {h['host']}")
+        # グループIDの解決
+        h_group_ids = []
+        for grp in h["groups"]:
+            if grp["name"] in group_map:
+                h_group_ids.append({"groupid": group_map[grp["name"]]})
+        
+        # テンプレートIDの解決
+        h_template_ids = []
+        for tpl in h["templates"]:
+            if tpl["name"] in template_map:
+                h_template_ids.append({"templateid": template_map[tpl["name"]]})
+            else:
+                logs.append(f"⚠️ Template not found: {tpl['name']} (Skip)")
 
-    # 3. Actions
+        # ホスト作成用ペイロード
+        host_payload = {
+            "host": h["host"],
+            "name": h["name"],
+            "groups": h_group_ids,      # 【重要】解決済みのIDリストを渡す
+            "templates": h_template_ids, # 【重要】解決済みのIDリストを渡す
+            "interfaces": h["interfaces"],
+            "macros": h["macros"],
+            "tags": h["tags"],
+            "inventory_mode": h["inventory_mode"]
+        }
+
+        if not h_group_ids:
+            logs.append(f"❌ Skip Host {h['host']}: No valid groups")
+            continue
+
+        try:
+            # 存在確認
+            existing = api.call("host.get", {"filter": {"host": h["host"]}})
+            if existing:
+                hid = existing[0]['hostid']
+                host_payload["hostid"] = hid
+                del host_payload["interfaces"] # 更新時はIF除外
+                api.call("host.update", host_payload)
+                logs.append(f"🔄 Host Updated: {h['host']}")
+            else:
+                api.call("host.create", host_payload)
+                logs.append(f"✨ Host Created: {h['host']}")
+        except Exception as e:
+            logs.append(f"❌ Host Error {h['host']}: {e}")
+
+    # 4. Actions (省略 - 作成のみ)
     for a in config["actions"]:
         try:
-            api.call("action.create", {"name": a["name"]})
+            api.call("action.create", {"name": a["name"], "eventsource": 0, "status": 0, "filter": a["filter"], "operations": a["operations"]})
             logs.append(f"🔔 Action Configured: {a['name']}")
         except: pass
 
@@ -329,19 +367,14 @@ def push_config_to_zabbix(api: Any, config: Dict):
 
 # ==================== UIメイン処理 ====================
 def main():
-    if "zabbix_connected" not in st.session_state:
-        st.session_state.zabbix_connected = False
-    if "zabbix_version" not in st.session_state:
-        st.session_state.zabbix_version = ""
-    if "is_mock" not in st.session_state:
-        st.session_state.is_mock = False
-    if "rules_generated" not in st.session_state:
-        st.session_state.rules_generated = False
+    if "zabbix_connected" not in st.session_state: st.session_state.zabbix_connected = False
+    if "zabbix_version" not in st.session_state: st.session_state.zabbix_version = ""
+    if "is_mock" not in st.session_state: st.session_state.is_mock = False
+    if "rules_generated" not in st.session_state: st.session_state.rules_generated = False
 
     with st.sidebar:
         st.header("📂 データソース")
         uploaded_file = st.file_uploader("設定ファイル (JSON)", type=["json"])
-        
         st.divider()
         st.header("🔗 Zabbix API接続")
         use_mock = st.checkbox("🧪 モックモード", value=False)
@@ -357,13 +390,11 @@ def main():
                     if not zabbix_url: raise Exception("URLを入力してください")
                     api = ZabbixAPI(zabbix_url, zabbix_token)
                     st.session_state.is_mock = False
-                
                 ver = api.check_connection()
                 st.session_state.zabbix_connected = True
                 st.session_state.zabbix_version = ver
             except Exception as e:
                 st.session_state.zabbix_connected = False
-                st.session_state.zabbix_version = ""
                 st.error(f"エラー: {e}")
 
         if st.session_state.zabbix_connected:
@@ -381,7 +412,7 @@ def main():
     else: full_data = load_full_topology_data()
     
     if not full_data or not full_data.get("topology"):
-        st.warning("⚠️ デバイスデータがありません。トポロジービルダーで作成してください。")
+        st.warning("⚠️ デバイスデータがありません。")
         return
 
     macro_config = load_json_config("zabbix_macros.json", DEFAULT_MACROS)
@@ -390,14 +421,10 @@ def main():
 
     tab1, tab2, tab3 = st.tabs(["1. ホスト & テンプレート", "2. マクロ & 閾値", "3. 通知 & アクション"])
 
-    # --- Tab 1 ---
     with tab1:
-        st.markdown("#### 📦 テンプレート割り当てルール")
-        st.caption("AIがデバイスごとのテンプレート割り当てと、推奨される閾値（マクロ）を自動提案します。")
-        
+        st.markdown("#### 📦 テンプレート割り当て")
         if template_mapping.get("mappings"):
-            current_topology = full_data.get("topology", {})
-            cleaned = filter_mappings_by_topology(template_mapping["mappings"], current_topology)
+            cleaned = filter_mappings_by_topology(template_mapping["mappings"], full_data.get("topology", {}))
             if len(cleaned) != len(template_mapping["mappings"]):
                 template_mapping["mappings"] = cleaned
                 save_json_config("template_mapping.json", template_mapping)
@@ -415,100 +442,74 @@ def main():
             with st.status("🤖 AIエージェントが分析中...", expanded=True) as status:
                 ai = TemplateRecommenderAI()
                 recs = ai.recommend(devices_summary)
-                
-                new_mappings = []
-                for r in recs:
-                    new_mappings.append(r)
-                
-                template_mapping["mappings"] = new_mappings
+                template_mapping["mappings"] = recs
                 save_json_config("template_mapping.json", template_mapping)
                 st.session_state.rules_generated = True
-                status.update(label="✅ 完了", state="complete", expanded=False)
+                status.update(label="✅ 完了", state="complete")
             st.rerun()
 
         if st.session_state.rules_generated and template_mapping.get("mappings"):
-            # マクロカラムは辞書型なので、表示用に整形
             df_display = pd.DataFrame(template_mapping["mappings"])
             if "macros" in df_display.columns:
                 df_display["macros"] = df_display["macros"].apply(lambda x: json.dumps(x, ensure_ascii=False) if x else "")
-            
             st.dataframe(df_display, use_container_width=True)
         elif not st.session_state.rules_generated:
-            st.info("上のボタンを押して、デバイス情報から推奨テンプレートを生成してください。")
+            st.info("上のボタンを押して生成を開始してください。")
 
-    # --- Tab 2 ---
     with tab2:
-        st.markdown("#### ⚡ グローバルマクロ設定 (共通ポリシー)")
-        st.caption("全ホストに適用される基本ポリシーです。AIが推奨値を持っている場合は、そちらが優先(上書き)されます。")
-        
+        st.markdown("#### ⚡ グローバルマクロ設定")
         if st.session_state.rules_generated:
             df_macros = pd.DataFrame(macro_config)
-            edited_macros = st.data_editor(
-                df_macros,
-                column_config={
-                    "macro": st.column_config.TextColumn("マクロ名", required=True, width="medium"),
-                    "value": st.column_config.TextColumn("設定値", required=True),
-                    "desc": st.column_config.TextColumn("説明", required=False)
-                },
-                hide_index=True, use_container_width=True, num_rows="dynamic"
-            )
+            if "selected" not in df_macros.columns: df_macros.insert(0, "selected", False)
+            edited_macros = st.data_editor(df_macros, column_config={"selected": st.column_config.CheckboxColumn("選択", width="small"), "macro": st.column_config.TextColumn("マクロ名", required=True), "value": st.column_config.TextColumn("設定値", required=True)}, hide_index=True, use_container_width=True, num_rows="dynamic")
             
-            # 複製・保存ボタン
             c_dup, c_save = st.columns([1, 1])
             with c_dup:
-                # 選択機能はDataEditorの仕様上、別途カラムが必要だが、今回はシンプルに保存機能のみ実装
-                pass 
+                if st.button("📋 選択した行を複製", use_container_width=True):
+                    sel = edited_macros[edited_macros["selected"]]
+                    if not sel.empty:
+                        new_data = edited_macros.drop(columns=["selected"]).to_dict(orient="records") + sel.drop(columns=["selected"]).to_dict(orient="records")
+                        save_json_config("zabbix_macros.json", new_data)
+                        st.rerun()
             with c_save:
-                if st.button("💾 マクロ設定を保存", type="primary", use_container_width=True):
-                    new_config = edited_macros.to_dict(orient="records")
-                    save_json_config("zabbix_macros.json", new_config)
+                if st.button("💾 保存", type="primary", use_container_width=True):
+                    save_json_config("zabbix_macros.json", edited_macros.drop(columns=["selected"]).to_dict(orient="records"))
                     st.success("保存しました")
-        else:
-            st.info("テンプレートの割り当て（Tab 1）完了後に設定可能になります。")
 
-    # --- Tab 3 ---
     with tab3:
-        st.markdown("#### 📢 メディアタイプ & アクション設定")
-        c_media, c_action = st.columns(2)
-        with c_media:
-            with st.container(border=True):
-                st.subheader("✉️ メール設定")
-                new_smtp = st.text_input("SMTPサーバー", media_config.get("smtp_server"))
-                new_email = st.text_input("送信元アドレス", media_config.get("smtp_email"))
-        with c_action:
-            with st.container(border=True):
-                st.subheader("🔔 アクション条件")
-                severity_opts = ["Information", "Warning", "Average", "High", "Disaster"]
-                curr_sev = media_config.get("alert_severity", "Average")
-                new_sev = st.selectbox("深刻度 (Severity) 以上", severity_opts, index=severity_opts.index(curr_sev))
-        if st.button("💾 通知設定を保存"):
-            media_config.update({"smtp_server": new_smtp, "smtp_email": new_email, "alert_severity": new_sev})
+        st.markdown("#### 📢 通知設定")
+        c_m, c_a = st.columns(2)
+        with c_m:
+            st.subheader("✉️ SMTP")
+            ns = st.text_input("Server", media_config.get("smtp_server"))
+            ne = st.text_input("Email", media_config.get("smtp_email"))
+        with c_a:
+            st.subheader("🔔 条件")
+            sev = st.selectbox("深刻度", ["Information", "Warning", "Average", "High", "Disaster"], index=2)
+        if st.button("💾 保存"):
+            media_config.update({"smtp_server": ns, "smtp_email": ne, "alert_severity": sev})
             save_json_config("zabbix_media.json", media_config)
             st.success("保存しました")
 
-    # === 実行 ===
     st.divider()
     config = generate_zabbix_config(full_data, macro_config, template_mapping, media_config)
     
     st.subheader("🚀 Zabbixへの反映")
     c_dl, c_push = st.columns(2)
     with c_dl:
-        st.download_button("📥 Zabbix設定(JSON)をダウンロード", json.dumps(config, indent=2, ensure_ascii=False), "zabbix_config.json", "application/json", use_container_width=True)
+        st.download_button("📥 JSONダウンロード", json.dumps(config, indent=2, ensure_ascii=False), "zabbix_config.json", "application/json", use_container_width=True)
     with c_push:
         can_push = st.session_state.zabbix_connected and len(config["hosts"]) > 0
-        if st.button("🚀 Zabbix APIへ投入 (実装済)", disabled=not can_push, use_container_width=True):
-            if st.session_state.is_mock: api = MockZabbixAPI()
-            else: api = ZabbixAPI(zabbix_url, zabbix_token)
-            with st.status("Zabbixへ設定を投入中...", expanded=True) as status:
+        if st.button("🚀 Zabbix APIへ投入", disabled=not can_push, use_container_width=True):
+            api = MockZabbixAPI() if st.session_state.is_mock else ZabbixAPI(zabbix_url, zabbix_token)
+            with st.status("投入中...", expanded=True) as status:
                 try:
                     logs = push_config_to_zabbix(api, config)
-                    st.write("--- 処理ログ ---")
                     for l in logs: st.write(l)
-                    status.update(label="✅ 投入完了！", state="complete", expanded=True)
-                    st.success(f"成功: {len(config['hosts'])} 台のホスト設定を反映しました。")
+                    status.update(label="完了", state="complete")
+                    st.success(f"成功: {len(config['hosts'])} 台")
                 except Exception as e:
-                    status.update(label="❌ エラー発生", state="error", expanded=True)
-                    st.error(f"APIエラー: {e}")
+                    st.error(f"エラー: {e}")
 
 if __name__ == "__main__":
     main()
