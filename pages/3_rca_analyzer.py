@@ -511,6 +511,8 @@ def render_visjs(topology, rc_list, sym_list, unrelated_list=None):
         shape = "box"
         border_width = 1
         font_color = "#333"
+        font_vadjust = 0  # ラベル位置の垂直調整
+        node_size = None  # shapeがbox以外の場合に使用
         
         if did in rc_hosts:
             color = "#EF5350"  # 赤（真因）
@@ -523,7 +525,9 @@ def render_visjs(topology, rc_list, sym_list, unrelated_list=None):
         elif did in unrelated_hosts:
             color = "#AB47BC"  # 紫（ノイズ）
             shape = "diamond"
-            font_color = "white"
+            font_color = "#AB47BC"  # ノードと同じ色でラベル表示
+            font_vadjust = -45  # ラベルをノードの上に配置
+            node_size = 25  # ひし形のサイズ
 
         meta = d.get("metadata", {})
         vendor = meta.get('vendor', '')
@@ -531,16 +535,28 @@ def render_visjs(topology, rc_list, sym_list, unrelated_list=None):
         vendor_short = vendor[:8] + ".." if len(vendor) > 10 else vendor
         label = f"{did}\\n({vendor_short})" if vendor_short else did
         
-        nodes.append({
+        node_obj = {
             "id": did,
             "label": label,
             "color": {"background": color, "border": "#333" if did in rc_hosts else color},
             "shape": shape,
             "borderWidth": border_width,
-            "font": {"color": font_color, "size": 11, "face": "Arial", "bold": True if did in rc_hosts else False},
-            "widthConstraint": {"minimum": 80, "maximum": 150},
-            "heightConstraint": {"minimum": 30}
-        })
+            "font": {
+                "color": font_color, 
+                "size": 14,  # フォントサイズを拡大
+                "face": "Arial", 
+                "bold": True if did in rc_hosts else False,
+                "vadjust": font_vadjust
+            },
+            "widthConstraint": {"minimum": 90, "maximum": 160},
+            "heightConstraint": {"minimum": 35}
+        }
+        
+        # ひし形の場合はsizeを設定
+        if node_size:
+            node_obj["size"] = node_size
+        
+        nodes.append(node_obj)
 
     edges = [
         {"from": c["from"], "to": c["to"], "arrows": "to" if c["type"] == "uplink" else "", "color": "#999"}
@@ -695,21 +711,34 @@ def main():
     if "scenario" not in st.session_state:
         st.session_state.scenario = "simple"
 
+    # シナリオ変更時のコールバック
+    def on_scenario_change():
+        st.session_state.scenario = st.session_state.scenario_select
+        st.session_state.rca_data = None
+        st.session_state.selected_rc_host = None
+
     with st.sidebar:
         st.header("⚙️ RCA Config")
         
         # シナリオ選択
         st.subheader("📋 デモシナリオ")
         scenario_options = {k: v["name"] for k, v in DEMO_SCENARIOS.items()}
+        
+        # 現在のシナリオのインデックスを取得
+        scenario_keys = list(scenario_options.keys())
+        current_index = scenario_keys.index(st.session_state.scenario) if st.session_state.scenario in scenario_keys else 0
+        
         selected_scenario = st.selectbox(
             "シナリオを選択",
-            options=list(scenario_options.keys()),
+            options=scenario_keys,
+            index=current_index,
             format_func=lambda x: scenario_options[x],
-            key="scenario_select"
+            key="scenario_select",
+            on_change=on_scenario_change  # 変更時に自動実行
         )
         
         # シナリオの説明
-        st.caption(DEMO_SCENARIOS[selected_scenario]["description"])
+        st.caption(DEMO_SCENARIOS[st.session_state.scenario]["description"])
         
         st.divider()
         
@@ -718,15 +747,15 @@ def main():
         
         st.divider()
         
-        if st.button("🔄 シナリオ実行", type="primary", use_container_width=True):
+        if st.button("🔄 再実行", type="primary", use_container_width=True):
             st.session_state.rca_data = None
             st.session_state.selected_rc_host = None
-            st.session_state.scenario = selected_scenario
             st.rerun()
         
         if st.button("🗑️ リセット", use_container_width=True):
             st.session_state.rca_data = None
             st.session_state.selected_rc_host = None
+            st.session_state.scenario = "simple"
             st.rerun()
 
     st.title("🔍 根本原因分析 & AI復旧支援")
