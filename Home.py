@@ -1,4 +1,5 @@
 import streamlit as st
+import os
 
 st.set_page_config(
     page_title="Zabbix RCA Tool",
@@ -15,7 +16,7 @@ def get_session_status():
     """
     status = {
         "topology": {"count": 0, "status": "⚠️ 未作成"},
-        "config": {"count": 0, "status": "ℹ️ 未生成"}, # 今回のスコープ外だが枠組みだけ用意
+        "config": {"count": 0, "status": "ℹ️ 未生成"},
         "alerts": {"count": 0, "status": "ℹ️ 待機中"},
     }
     
@@ -33,52 +34,45 @@ def get_session_status():
     return status
 
 # ==================== メイン ====================
-st.title("🔍 Zabbix RCA Tool")
+def main():
+    st.title("🔍 Zabbix RCA Tool")
+    
+    # ステータス表示
+    current_status = get_session_status()
+    
+    st.divider()
 
-st.divider()
+    # クイックアクセス
+    st.subheader("🚀 クイックアクセス")
+    
+    # 【改修】4列から3列に変更し、Data Managerへのリンクを削除
+    col1, col2, col3 = st.columns(3)
 
-# クイックアクセス
-st.subheader("🚀 クイックアクセス")
+    with col1:
+        st.markdown("##### 1. 構成管理")
+        if st.button("🔧 トポロジービルダー", use_container_width=True, type="primary"):
+            st.switch_page("pages/1_topology_builder.py")
+        st.caption(f"現在の状態: {current_status['topology']['status']}")
 
-col1, col2, col3, col4 = st.columns(4)
+    with col2:
+        st.markdown("##### 2. 設定生成")
+        # 【改修】リンクを有効化
+        if st.button("⚙️ 監視設定生成", use_container_width=True):
+            st.switch_page("pages/2_config_generator.py")
+        st.caption("AIによるテンプレート推奨と設定出力")
 
-with col1:
-    if st.button("🔧 トポロジービルダー", use_container_width=True, type="primary"):
-        st.switch_page("pages/1_topology_builder.py")
+    with col3:
+        st.markdown("##### 3. 分析・復旧")
+        # 【改修】リンクを有効化 (ファイル名を 3_rca_analysis.py に修正)
+        if st.button("🎯 根本原因分析 & AI Ops", use_container_width=True):
+            st.switch_page("pages/3_rca_analysis.py")
+        st.caption("トポロジー分析による真因特定と復旧")
 
-with col2:
-    if st.button("⚙️ 監視設定生成", use_container_width=True):
-        st.info("構築中...") # st.switch_page("pages/2_config_generator.py")
+    st.divider()
 
-with col3:
-    if st.button("🎯 根本原因分析", use_container_width=True):
-         st.info("構築中...") # st.switch_page("pages/3_rca_analyzer.py")
+    # 現在の状態詳細
+    st.subheader("📊 現在のセッション状態")
+    st.info("※ ブラウザを閉じるとメモリ内のデータ（作成中のトポロジー等）はリセットされます。各画面でJSONをダウンロードして保存することをお勧めします。")
 
-with col4:
-    # データ管理ページへのリンク（必要であれば）
-    st.empty()
-
-st.divider()
-
-# 現在の状態
-st.subheader("📊 現在のセッション状態")
-st.caption("※ ブラウザを閉じるとデータはリセットされます。トポロジー画面でJSONを保存してください。")
-
-status = get_session_status()
-
-col1, col2, col3 = st.columns(3)
-
-with col1:
-    with st.container(border=True):
-        st.markdown("**🗺️ トポロジー**")
-        st.markdown(status["topology"]["status"])
-
-with col2:
-    with st.container(border=True):
-        st.markdown("**⚙️ 監視設定**")
-        st.markdown(status["config"]["status"])
-
-with col3:
-    with st.container(border=True):
-        st.markdown("**🎯 RCA**")
-        st.markdown(status["alerts"]["status"])
+if __name__ == "__main__":
+    main()
