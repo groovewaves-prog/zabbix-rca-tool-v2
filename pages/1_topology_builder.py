@@ -1,7 +1,6 @@
 import streamlit as st
 import streamlit.components.v1 as components
 import json
-import statistics
 from typing import Dict, List, Set
 
 # ==================== ページ設定 ====================
@@ -49,6 +48,12 @@ def init_session():
         
     if "site_name" not in st.session_state:
         st.session_state.site_name = "Tokyo-HQ"
+    
+    # 【修正】ダイアログ制御用フラグを追加
+    if "pending_dialog" not in st.session_state:
+        st.session_state.pending_dialog = None
+    if "pending_dialog_device" not in st.session_state:
+        st.session_state.pending_dialog_device = None
 
 # ==================== ロジック・計算 ====================
 def calculate_layers() -> Dict[str, int]:
@@ -301,6 +306,8 @@ def connection_dialog(source_id: str, mode: str):
     target_id = st.selectbox("接続先デバイス", candidates)
     
     if st.button("接続を作成", type="primary", use_container_width=True):
+        # uplink: target(親) → source(子) の関係で保存
+        # peer: 順序を維持
         new_conn = {
             "from": target_id if mode == "uplink" else source_id,
             "to": source_id if mode == "uplink" else target_id,
@@ -458,8 +465,10 @@ def render_device_list():
                         with t1:
                             tv_head, tv_btn = st.columns([3, 2])
                             tv_head.markdown("##### デバイス種別・ベンダー")
+                            # 【修正】フォーム内ではフラグを立てるだけにする
                             if tv_btn.form_submit_button("🛠️ Type/Vendor 管理"):
-                                manage_master_data_dialog()
+                                st.session_state.pending_dialog = "master_data"
+                                st.session_state.pending_dialog_device = dev_id
 
                             r1c1, r1c2 = st.columns(2)
                             curr_type = dev.get("type", "SWITCH")
@@ -483,8 +492,10 @@ def render_device_list():
                             st.divider()
                             cm1, cm2 = st.columns([3,2])
                             cm1.markdown("##### 追加モジュール構成")
+                            # 【修正】フォーム内ではフラグを立てるだけにする
                             if cm2.form_submit_button("🛠️ モジュール定義編集"):
-                                manage_modules_dialog()
+                                st.session_state.pending_dialog = "modules"
+                                st.session_state.pending_dialog_device = dev_id
                             curr_mods = meta.get("hw_inventory", {}).get("custom_modules", {})
                             new_mods = {}
                             if st.session_state.module_master_list:
@@ -603,6 +614,15 @@ def render_data_io():
     if st.button("🗑️ 全データをクリア", type="primary", use_container_width=True):
         clear_data_dialog()
 
+
+# 【修正】接続オブジェクトの一意識別用ヘルパー関数
+def _connection_matches(conn: dict, target_conn: dict) -> bool:
+    """2つの接続オブジェクトが同一かどうかを判定"""
+    return (conn["from"] == target_conn["from"] and 
+            conn["to"] == target_conn["to"] and 
+            conn["type"] == target_conn["type"])
+
+
 # ==================== メイン ====================
 def main():
     init_session()
@@ -635,9 +655,21 @@ def main():
                 label = f"**⬇️** {c['to']} → {c['from']}" if c['type'] == 'uplink' else f"**↔️** {c['from']} ↔ {c['to']}"
                 c1.markdown(f"{label} {tags}")
                 if c2.button("🗑️", key=f"del_conn_{i}"):
-                    st.session_state.connections.pop(i)
+                    # 【修正】インデックスではなく接続オブジェクト自体を使って削除
+                    st.session_state.connections = [
+                        conn for conn in st.session_state.connections 
+                        if not _connection_matches(conn, c)
+                    ]
                     st.rerun()
         render_data_io()
+    
+    # 【修正】フォーム外でダイアログを処理（フォーム内でのダイアログ呼び出し問題を回避）
+    if st.session_state.pending_dialog == "master_data":
+        st.session_state.pending_dialog = None
+        manage_master_data_dialog()
+    elif st.session_state.pending_dialog == "modules":
+        st.session_state.pending_dialog = None
+        manage_modules_dialog()
 
 if __name__ == "__main__":
     main()
