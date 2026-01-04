@@ -435,22 +435,22 @@ def main():
                 df_display["macros"] = df_display["macros"].apply(lambda x: json.dumps(x, ensure_ascii=False) if x else "")
             st.dataframe(df_display, use_container_width=True)
             
-            # 【新規追加】ホスト一覧プレビュー
             st.divider()
             st.markdown("##### 📋 生成されるホスト一覧")
             
+            # 【修正】Site Name カラムを追加
+            site_name = full_data.get("site_name", "Unknown-Site")
             host_preview_list = []
             for dev_id, dev_data in full_data.get("topology", {}).items():
                 meta = dev_data.get("metadata", {})
-                assigned_tpl = "Template Module ICMP Ping" # fallback
-                
-                # ルールからテンプレートを解決
+                assigned_tpl = "Template Module ICMP Ping"
                 for rule in template_mapping.get("mappings", []):
                     if rule.get("vendor") == meta.get("vendor") and rule.get("type") == dev_data.get("type"):
                         assigned_tpl = rule["template"]
                         break
                 
                 host_preview_list.append({
+                    "Site Name": site_name, # 先頭に追加
                     "Host Name": dev_id,
                     "Vendor": meta.get("vendor"),
                     "Type": dev_data.get("type"),
@@ -479,10 +479,8 @@ def main():
                         new_data = edited_macros.drop(columns=["selected"]).to_dict(orient="records") + sel.drop(columns=["selected"]).to_dict(orient="records")
                         save_json_config("zabbix_macros.json", new_data)
                         st.rerun()
-            # 【新規追加】削除ボタン
             with c_del:
                 if st.button("🗑️ 選択した行を削除", use_container_width=True):
-                    # 選択されていない行だけを残す
                     remain = edited_macros[edited_macros["selected"] == False]
                     new_data = remain.drop(columns=["selected"]).to_dict(orient="records")
                     save_json_config("zabbix_macros.json", new_data)
