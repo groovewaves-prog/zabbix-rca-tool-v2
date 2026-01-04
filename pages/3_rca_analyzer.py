@@ -509,32 +509,37 @@ def render_visjs(topology, rc_list, sym_list, unrelated_list=None):
         # デフォルト（正常）
         color = "#66BB6A"  # 緑
         shape = "box"
-        size = 25
         border_width = 1
+        font_color = "#333"
         
         if did in rc_hosts:
             color = "#EF5350"  # 赤（真因）
             shape = "ellipse"
-            size = 45
             border_width = 3
+            font_color = "white"
         elif did in sym_hosts:
             color = "#FFA726"  # オレンジ（派生）
-            size = 30
+            font_color = "white"
         elif did in unrelated_hosts:
             color = "#AB47BC"  # 紫（ノイズ）
             shape = "diamond"
-            size = 28
+            font_color = "white"
 
         meta = d.get("metadata", {})
-        label = f"{did}\\n({meta.get('vendor', '')})"
+        vendor = meta.get('vendor', '')
+        # ラベルを短縮（ベンダー名が長い場合は省略）
+        vendor_short = vendor[:8] + ".." if len(vendor) > 10 else vendor
+        label = f"{did}\\n({vendor_short})" if vendor_short else did
+        
         nodes.append({
             "id": did,
             "label": label,
             "color": {"background": color, "border": "#333" if did in rc_hosts else color},
             "shape": shape,
-            "size": size,
             "borderWidth": border_width,
-            "font": {"color": "white" if did in rc_hosts else ("white" if did in sym_hosts else "black")}
+            "font": {"color": font_color, "size": 11, "face": "Arial", "bold": True if did in rc_hosts else False},
+            "widthConstraint": {"minimum": 80, "maximum": 150},
+            "heightConstraint": {"minimum": 30}
         })
 
     edges = [
@@ -555,24 +560,44 @@ def render_visjs(topology, rc_list, sym_list, unrelated_list=None):
     html = f"""
 <html><head>
 <script src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
-<style>body{{margin:0;padding:0;}}#container{{position:relative;width:100%;height:450px;}}</style>
+<style>body{{margin:0;padding:0;}}#container{{position:relative;width:100%;height:600px;}}</style>
 </head>
 <body>
 <div id="container">
-    <div id="mynetwork" style="height:450px;border:1px solid lightgray;"></div>
+    <div id="mynetwork" style="height:600px;border:1px solid lightgray;"></div>
     {legend_html}
 </div>
 <script>
 var data = {{nodes: new vis.DataSet({json.dumps(nodes)}), edges: new vis.DataSet({json.dumps(edges)})}};
 var options = {{
-    layout:{{hierarchical:{{enabled:true, direction:"DU", sortMethod:"directed", levelSeparation: 100, nodeSpacing: 150}}}},
+    layout:{{
+        hierarchical:{{
+            enabled: true,
+            direction: "DU",
+            sortMethod: "directed",
+            levelSeparation: 130,
+            nodeSpacing: 280,
+            treeSpacing: 300,
+            blockShifting: true,
+            edgeMinimization: true,
+            parentCentralization: true
+        }}
+    }},
     physics:{{enabled:false}},
-    interaction:{{hover:true, tooltipDelay:100}}
+    interaction:{{hover:true, tooltipDelay:100, zoomView:true, dragView:true}},
+    nodes:{{
+        font:{{size:12, face:'Arial'}},
+        margin:{{top:8, bottom:8, left:10, right:10}}
+    }},
+    edges:{{
+        smooth:{{type:'cubicBezier', forceDirection:'vertical', roundness:0.4}}
+    }}
 }};
-new vis.Network(document.getElementById('mynetwork'), data, options);
+var network = new vis.Network(document.getElementById('mynetwork'), data, options);
+network.fit({{padding:50}});
 </script></body></html>
 """
-    components.html(html, height=470)
+    components.html(html, height=620)
 
 
 def render_ai_ops_panel(target_rc: Dict):
