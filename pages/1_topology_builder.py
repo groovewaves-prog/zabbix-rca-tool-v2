@@ -431,11 +431,10 @@ def render_device_list():
             dev = st.session_state.devices[dev_id]
             meta = dev.get("metadata", {})
             
-            # 【改修】必須項目チェック（設置場所を除外）
+            # 必須項目チェック（設置場所を除外）
             missing_items = []
             if not meta.get("vendor"): missing_items.append("Vendor")
             if not meta.get("model"): missing_items.append("Model")
-            # 設置場所(rack_info)は必須としない
             
             c_chk, c_card = st.columns([0.5, 6])
             c_chk.write(""); c_chk.checkbox("", key=f"chk_{dev_id}")
@@ -537,9 +536,12 @@ def render_data_io():
     c1, c2 = st.columns(2)
     with c1:
         fname = st.text_input("保存ファイル名", value="topology.json")
+        # 【修正】注意書きを追加
+        st.caption("⚠️ **注意:** 入力後は必ず **Enterキー** を押して確定してください。")
+        
         if not fname.endswith(".json"): fname += ".json"
         
-        # 【改修】エクスポートチェック（設置場所を除外）
+        # エクスポートチェック（設置場所を除外）
         incomplete_count = 0
         for d in st.session_state.devices.values():
             m = d.get("metadata", {})
