@@ -512,6 +512,7 @@ def render_visjs(topology, rc_list, sym_list, unrelated_list=None):
         border_width = 1
         font_color = "#333"
         font_vadjust = 0  # ラベル位置の垂直調整
+        font_background = None  # ラベル背景色
         node_size = None  # shapeがbox以外の場合に使用
         
         if did in rc_hosts:
@@ -525,9 +526,10 @@ def render_visjs(topology, rc_list, sym_list, unrelated_list=None):
         elif did in unrelated_hosts:
             color = "#AB47BC"  # 紫（ノイズ）
             shape = "diamond"
-            font_color = "#AB47BC"  # ノードと同じ色でラベル表示
-            font_vadjust = -45  # ラベルをノードの上に配置
-            node_size = 25  # ひし形のサイズ
+            font_color = "#333"  # 黒文字で視認性向上
+            font_vadjust = -50  # ラベルをノードの上に配置
+            node_size = 20  # ひし形を少し小さく
+            font_background = "rgba(255,255,255,0.9)"  # 白背景で重なりを回避
 
         meta = d.get("metadata", {})
         vendor = meta.get('vendor', '')
@@ -535,19 +537,24 @@ def render_visjs(topology, rc_list, sym_list, unrelated_list=None):
         vendor_short = vendor[:8] + ".." if len(vendor) > 10 else vendor
         label = f"{did}\\n({vendor_short})" if vendor_short else did
         
+        font_config = {
+            "color": font_color, 
+            "size": 14,
+            "face": "Arial", 
+            "bold": True if did in rc_hosts else False,
+            "vadjust": font_vadjust
+        }
+        # ひし形の場合のみ背景色を追加
+        if font_background:
+            font_config["background"] = font_background
+        
         node_obj = {
             "id": did,
             "label": label,
             "color": {"background": color, "border": "#333" if did in rc_hosts else color},
             "shape": shape,
             "borderWidth": border_width,
-            "font": {
-                "color": font_color, 
-                "size": 14,  # フォントサイズを拡大
-                "face": "Arial", 
-                "bold": True if did in rc_hosts else False,
-                "vadjust": font_vadjust
-            },
+            "font": font_config,
             "widthConstraint": {"minimum": 90, "maximum": 160},
             "heightConstraint": {"minimum": 35}
         }
