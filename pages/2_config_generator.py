@@ -191,7 +191,6 @@ class MockZabbixAPI:
     def __init__(self): pass
     def call(self, method: str, params: Any = None):
         if method == "apiinfo.version": return "6.4.0 (Mock)"
-        # モックでもID解決ができるようにダミーデータを返す
         if method == "hostgroup.get": return [{"groupid": "101", "name": "Tokyo-HQ"}, {"groupid": "102", "name": "Tokyo-HQ/SWITCH"}]
         if method == "hostgroup.create": return {"groupids": ["103"]}
         if method == "template.get": return [{"templateid": "1001", "name": "Template Module ICMP Ping"}, {"templateid": "1002", "name": "Template Net Cisco IOS SNMP"}]
@@ -234,7 +233,6 @@ def generate_zabbix_config(full_data: Dict, macro_config: List[Dict], template_m
                 ai_macros = rule.get("macros", [])
                 break
         
-        # マクロ結合
         final_macros_dict = {m["macro"]: m["value"] for m in macro_config}
         for m in ai_macros:
             final_macros_dict[m["macro"]] = m["value"]
@@ -275,66 +273,49 @@ def generate_zabbix_config(full_data: Dict, macro_config: List[Dict], template_m
 
     return config
 
-# ==================== API投入ロジック (修正版) ====================
+# ==================== API投入ロジック ====================
 def push_config_to_zabbix(api: Any, config: Dict):
     logs = []
     
-    # --- 1. Host Groups (Create & Get IDs) ---
-    group_map = {} # name -> id
-    
-    # 既存グループの取得（重複エラー回避のため）
+    # 1. Groups
+    group_map = {}
     try:
         existing = api.call("hostgroup.get", {"output": ["groupid", "name"]})
         group_map = {g['name']: g['groupid'] for g in existing}
-    except Exception as e:
-        logs.append(f"ℹ️ Pre-fetch groups failed (Mock?): {e}")
+    except Exception as e: logs.append(f"ℹ️ Pre-fetch groups failed: {e}")
 
     for g in config["host_groups"]:
         g_name = g["name"]
-        if g_name in group_map:
-            logs.append(f"ℹ️ Group exists: {g_name}")
+        if g_name in group_map: logs.append(f"ℹ️ Group exists: {g_name}")
         else:
             try:
                 res = api.call("hostgroup.create", {"name": g_name})
                 new_id = res['groupids'][0]
                 group_map[g_name] = new_id
                 logs.append(f"✅ Group Created: {g_name}")
-            except Exception as e:
-                logs.append(f"⚠️ Group Create Failed {g_name}: {e}")
+            except Exception as e: logs.append(f"⚠️ Group Create Failed {g_name}: {e}")
 
-    # --- 2. Templates (Get IDs) ---
-    template_map = {} # name -> id
+    # 2. Templates
+    template_map = {}
     try:
         t_list = api.call("template.get", {"output": ["templateid", "name"]})
         template_map = {t['name']: t['templateid'] for t in t_list}
     except: pass
 
-    # --- 3. Hosts (Create with Group IDs) ---
+    # 3. Hosts
     for h in config["hosts"]:
-        # グループIDの解決
         h_group_ids = []
         for grp in h["groups"]:
-            if grp["name"] in group_map:
-                h_group_ids.append({"groupid": group_map[grp["name"]]})
+            if grp["name"] in group_map: h_group_ids.append({"groupid": group_map[grp["name"]]})
         
-        # テンプレートIDの解決
         h_template_ids = []
         for tpl in h["templates"]:
-            if tpl["name"] in template_map:
-                h_template_ids.append({"templateid": template_map[tpl["name"]]})
-            else:
-                logs.append(f"⚠️ Template not found: {tpl['name']} (Skip)")
+            if tpl["name"] in template_map: h_template_ids.append({"templateid": template_map[tpl["name"]]})
+            else: logs.append(f"⚠️ Template not found: {tpl['name']} (Skip)")
 
-        # ホスト作成用ペイロード
         host_payload = {
-            "host": h["host"],
-            "name": h["name"],
-            "groups": h_group_ids,      # 【重要】解決済みのIDリストを渡す
-            "templates": h_template_ids, # 【重要】解決済みのIDリストを渡す
-            "interfaces": h["interfaces"],
-            "macros": h["macros"],
-            "tags": h["tags"],
-            "inventory_mode": h["inventory_mode"]
+            "host": h["host"], "name": h["name"], "groups": h_group_ids, "templates": h_template_ids,
+            "interfaces": h["interfaces"], "macros": h["macros"], "tags": h["tags"], "inventory_mode": h["inventory_mode"]
         }
 
         if not h_group_ids:
@@ -342,21 +323,18 @@ def push_config_to_zabbix(api: Any, config: Dict):
             continue
 
         try:
-            # 存在確認
             existing = api.call("host.get", {"filter": {"host": h["host"]}})
             if existing:
-                hid = existing[0]['hostid']
-                host_payload["hostid"] = hid
-                del host_payload["interfaces"] # 更新時はIF除外
+                host_payload["hostid"] = existing[0]['hostid']
+                del host_payload["interfaces"]
                 api.call("host.update", host_payload)
                 logs.append(f"🔄 Host Updated: {h['host']}")
             else:
                 api.call("host.create", host_payload)
                 logs.append(f"✨ Host Created: {h['host']}")
-        except Exception as e:
-            logs.append(f"❌ Host Error {h['host']}: {e}")
+        except Exception as e: logs.append(f"❌ Host Error {h['host']}: {e}")
 
-    # 4. Actions (省略 - 作成のみ)
+    # 4. Actions
     for a in config["actions"]:
         try:
             api.call("action.create", {"name": a["name"], "eventsource": 0, "status": 0, "filter": a["filter"], "operations": a["operations"]})
@@ -421,8 +399,10 @@ def main():
 
     tab1, tab2, tab3 = st.tabs(["1. ホスト & テンプレート", "2. マクロ & 閾値", "3. 通知 & アクション"])
 
+    # --- Tab 1 ---
     with tab1:
         st.markdown("#### 📦 テンプレート割り当て")
+        
         if template_mapping.get("mappings"):
             cleaned = filter_mappings_by_topology(template_mapping["mappings"], full_data.get("topology", {}))
             if len(cleaned) != len(template_mapping["mappings"]):
@@ -449,13 +429,41 @@ def main():
             st.rerun()
 
         if st.session_state.rules_generated and template_mapping.get("mappings"):
+            st.caption("定義されたマッピングルール:")
             df_display = pd.DataFrame(template_mapping["mappings"])
             if "macros" in df_display.columns:
                 df_display["macros"] = df_display["macros"].apply(lambda x: json.dumps(x, ensure_ascii=False) if x else "")
             st.dataframe(df_display, use_container_width=True)
+            
+            # 【新規追加】ホスト一覧プレビュー
+            st.divider()
+            st.markdown("##### 📋 生成されるホスト一覧")
+            
+            host_preview_list = []
+            for dev_id, dev_data in full_data.get("topology", {}).items():
+                meta = dev_data.get("metadata", {})
+                assigned_tpl = "Template Module ICMP Ping" # fallback
+                
+                # ルールからテンプレートを解決
+                for rule in template_mapping.get("mappings", []):
+                    if rule.get("vendor") == meta.get("vendor") and rule.get("type") == dev_data.get("type"):
+                        assigned_tpl = rule["template"]
+                        break
+                
+                host_preview_list.append({
+                    "Host Name": dev_id,
+                    "Vendor": meta.get("vendor"),
+                    "Type": dev_data.get("type"),
+                    "Model": meta.get("model"),
+                    "Assigned Template": assigned_tpl
+                })
+            
+            st.dataframe(pd.DataFrame(host_preview_list), use_container_width=True)
+            
         elif not st.session_state.rules_generated:
             st.info("上のボタンを押して生成を開始してください。")
 
+    # --- Tab 2 ---
     with tab2:
         st.markdown("#### ⚡ グローバルマクロ設定")
         if st.session_state.rules_generated:
@@ -463,7 +471,7 @@ def main():
             if "selected" not in df_macros.columns: df_macros.insert(0, "selected", False)
             edited_macros = st.data_editor(df_macros, column_config={"selected": st.column_config.CheckboxColumn("選択", width="small"), "macro": st.column_config.TextColumn("マクロ名", required=True), "value": st.column_config.TextColumn("設定値", required=True)}, hide_index=True, use_container_width=True, num_rows="dynamic")
             
-            c_dup, c_save = st.columns([1, 1])
+            c_dup, c_del, c_save = st.columns([1, 1, 2])
             with c_dup:
                 if st.button("📋 選択した行を複製", use_container_width=True):
                     sel = edited_macros[edited_macros["selected"]]
@@ -471,11 +479,24 @@ def main():
                         new_data = edited_macros.drop(columns=["selected"]).to_dict(orient="records") + sel.drop(columns=["selected"]).to_dict(orient="records")
                         save_json_config("zabbix_macros.json", new_data)
                         st.rerun()
+            # 【新規追加】削除ボタン
+            with c_del:
+                if st.button("🗑️ 選択した行を削除", use_container_width=True):
+                    # 選択されていない行だけを残す
+                    remain = edited_macros[edited_macros["selected"] == False]
+                    new_data = remain.drop(columns=["selected"]).to_dict(orient="records")
+                    save_json_config("zabbix_macros.json", new_data)
+                    st.success("削除しました")
+                    st.rerun()
+
             with c_save:
-                if st.button("💾 保存", type="primary", use_container_width=True):
+                if st.button("💾 設定を保存", type="primary", use_container_width=True):
                     save_json_config("zabbix_macros.json", edited_macros.drop(columns=["selected"]).to_dict(orient="records"))
                     st.success("保存しました")
+        else:
+            st.info("テンプレートの割り当て（Tab 1）完了後に設定可能になります。")
 
+    # --- Tab 3 ---
     with tab3:
         st.markdown("#### 📢 通知設定")
         c_m, c_a = st.columns(2)
